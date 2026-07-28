@@ -2,6 +2,7 @@ import { useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { CloseIcon } from "../ui/Icons";
 import { useAuthStore, type ProviderId } from "../../state/authStore";
+import { useChatStore } from "../../state/chatStore";
 import { useUiStore } from "../../state/uiStore";
 import { shortcutLabel, useWindowStore, type ToggleShortcut } from "../../state/windowStore";
 
@@ -87,6 +88,94 @@ function ShortcutRecorder() {
   );
 }
 
+function LocalChatsManager() {
+  const localConversations = useChatStore((s) => s.localConversations);
+  const deleteLocalConversations = useChatStore((s) => s.deleteLocalConversations);
+  const clearLocalConversations = useChatStore((s) => s.clearLocalConversations);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [confirmAll, setConfirmAll] = useState(false);
+
+  const toggle = (id: string) =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+
+  const deleteSelected = () => {
+    deleteLocalConversations([...selected]);
+    setSelected(new Set());
+  };
+
+  return (
+    <div className="flex flex-col gap-2 border-t border-white/10 pt-3">
+      <div className="flex items-center justify-between">
+        <SectionLabel>Local chats</SectionLabel>
+        <span className="text-[10px] tabular-nums text-white/40">{localConversations.length} saved</span>
+      </div>
+
+      {localConversations.length === 0 ? (
+        <p className="text-[11px] text-white/35">Chats you have on this device show up here.</p>
+      ) : (
+        <>
+          <div className="max-h-40 overflow-y-auto rounded-lg border border-white/10">
+            {localConversations.map((c) => (
+              <label
+                key={c.id}
+                className="flex cursor-pointer items-center gap-2 px-2 py-1.5 text-xs text-white/75 transition hover:bg-white/[0.05]"
+              >
+                <input
+                  type="checkbox"
+                  checked={selected.has(c.id)}
+                  onChange={() => toggle(c.id)}
+                  className="h-3.5 w-3.5 shrink-0 accent-[color:var(--accent)]"
+                />
+                <span className="w-8 shrink-0 text-[9px] uppercase tracking-wide text-white/30">
+                  {c.provider === "anthropic" ? "Claude" : "GPT"}
+                </span>
+                <span className="min-w-0 flex-1 truncate" title={c.title}>
+                  {c.title}
+                </span>
+              </label>
+            ))}
+          </div>
+
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={deleteSelected}
+              disabled={selected.size === 0}
+              className="rounded-lg border border-white/12 px-2.5 py-1.5 text-xs text-white/80 transition enabled:hover:border-white/25 disabled:opacity-35"
+            >
+              Delete selected{selected.size > 0 ? ` (${selected.size})` : ""}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                if (confirmAll) {
+                  clearLocalConversations();
+                  setSelected(new Set());
+                  setConfirmAll(false);
+                } else {
+                  setConfirmAll(true);
+                }
+              }}
+              onBlur={() => setConfirmAll(false)}
+              className={`ml-auto rounded-lg px-2.5 py-1.5 text-xs font-medium transition ${
+                confirmAll
+                  ? "bg-red-500/90 text-white hover:bg-red-500"
+                  : "border border-red-400/25 text-red-300/90 hover:border-red-400/50"
+              }`}
+            >
+              {confirmAll ? "Confirm delete all" : "Delete all"}
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 export function SettingsPanel() {
   const settingsOpen = useUiStore((s) => s.settingsOpen);
   const closeSettings = useUiStore((s) => s.closeSettings);
@@ -113,7 +202,7 @@ export function SettingsPanel() {
             onClick={closeSettings}
           />
           <motion.div
-            className="absolute bottom-3 left-3 right-3 z-20 rounded-2xl border border-white/10 bg-neutral-950/95 p-4 shadow-2xl backdrop-blur-xl"
+            className="absolute bottom-3 left-3 right-3 z-20 max-h-[calc(100%-1.5rem)] overflow-y-auto rounded-2xl border border-white/10 bg-neutral-950/95 p-4 shadow-2xl backdrop-blur-xl"
             initial={{ opacity: 0, y: 16, scale: 0.97 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 16, scale: 0.97 }}
@@ -166,6 +255,8 @@ export function SettingsPanel() {
               </label>
 
               <ShortcutRecorder />
+
+              <LocalChatsManager />
 
               {connected.length > 0 ? (
                 <div className="flex flex-col gap-2 border-t border-white/10 pt-3">

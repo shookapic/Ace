@@ -6,6 +6,14 @@ A minimal, stealth desktop chat overlay for **OpenAI** and **Anthropic (Claude)*
   <img src="src-tauri/icons/128x128@2x.png" width="96" alt="Ace icon" />
 </p>
 
+## Demo
+
+<p align="center">
+  <img src="docs/demo.svg" width="640" alt="Ace demo" />
+</p>
+
+> _Placeholder._ Drop a screen recording at **`docs/demo.gif`** and change the `src` above to `docs/demo.gif` to showcase the app in motion.
+
 ## Features
 
 - **Native OAuth login** for OpenAI and Anthropic — uses your own subscription, no API keys or third-party servers.

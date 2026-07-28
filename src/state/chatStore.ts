@@ -41,6 +41,41 @@ export interface ConversationSummary {
   updatedAt: string | null;
 }
 
+/** A chat saved on this device (survives restarts, unlike the live session). */
+export interface LocalConversation {
+  id: string;
+  provider: ProviderId;
+  title: string;
+  updatedAt: string;
+  messages: ChatMessage[];
+}
+
+const STORAGE_KEY = "ace.conversations.v1";
+
+function loadLocalConversations(): LocalConversation[] {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    return raw ? (JSON.parse(raw) as LocalConversation[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveLocalConversations(list: LocalConversation[]) {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(list));
+  } catch {
+    /* quota exceeded or storage disabled — non-fatal */
+  }
+}
+
+function deriveTitle(messages: ChatMessage[]): string {
+  const firstUser = messages.find((m) => m.role === "user");
+  const text = firstUser?.content.trim() ?? "";
+  if (!text) return "New conversation";
+  return text.length > 48 ? `${text.slice(0, 48)}…` : text;
+}
+
 interface ChatState {
   provider: ProviderId | null;
   messages: ChatMessage[];
@@ -56,6 +91,9 @@ interface ChatState {
   conversationsLoading: boolean;
   conversationsError: string | null;
   activeTitle: string | null;
+  localConversations: LocalConversation[];
+  activeConversationId: string | null;
+  lastConversationByProvider: Record<ProviderId, string | null>;
   setProvider: (provider: ProviderId) => void;
   setModel: (provider: ProviderId, modelId: string) => void;
   fetchModels: (provider: ProviderId) => Promise<void>;
@@ -64,6 +102,10 @@ interface ChatState {
   removeAttachment: (index: number) => void;
   fetchConversations: (provider: ProviderId) => Promise<void>;
   loadConversation: (provider: ProviderId, conversationId: string, title?: string) => Promise<void>;
+  loadLocalConversation: (id: string) => void;
+  deleteLocalConversation: (id: string) => void;
+  deleteLocalConversations: (ids: string[]) => void;
+  clearLocalConversations: () => void;
   newConversation: () => void;
   connectClaudeWeb: () => Promise<void>;
 }
@@ -88,7 +130,29 @@ export const useChatStore = create<ChatState>((set, get) => ({
   conversationsLoading: false,
   conversationsError: null,
   activeTitle: null,
-  setProvider: (provider) => set({ provider }),
+  localConversations: loadLocalConversations(),
+  activeConversationId: null,
+  lastConversationByProvider: { anthropic: null, openai: null },
+  // Switching providers parks the current chat and restores the one you last had
+  // open for the provider you're switching to — so bouncing between Claude and
+  // ChatGPT keeps each side's thread instead of merging them.
+  setProvider: (provider) =>
+    set((s) => {
+      if (s.provider === provider) return { provider };
+      const remembered = { ...s.lastConversationByProvider };
+      if (s.provider) remembered[s.provider] = s.activeConversationId;
+      const targetId = remembered[provider];
+      const conv = targetId ? s.localConversations.find((c) => c.id === targetId) : undefined;
+      return {
+        provider,
+        lastConversationByProvider: remembered,
+        messages: conv ? conv.messages.map((m) => ({ ...m })) : [],
+        activeConversationId: conv ? conv.id : null,
+        activeTitle: conv ? conv.title : null,
+        error: null,
+        pendingAttachments: [],
+      };
+    }),
   setModel: (provider, modelId) =>
     set((s) => ({ selectedModel: { ...s.selectedModel, [provider]: modelId } })),
   fetchModels: async (provider) => {
@@ -123,6 +187,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     };
     const assistantId = crypto.randomUUID();
     const requestId = crypto.randomUUID();
+    const conversationId = get().activeConversationId ?? crypto.randomUUID();
     const history = [...get().messages, userMessage].map((m) => ({
       role: m.role,
       content: m.content,
@@ -136,6 +201,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       sending: true,
       error: null,
       pendingAttachments: [],
+      activeConversationId: conversationId,
     }));
 
     try {
@@ -178,14 +244,60 @@ export const useChatStore = create<ChatState>((set, get) => ({
       set({
         messages: history.map((m) => ({ id: crypto.randomUUID(), role: m.role, content: m.content })),
         activeTitle: title ?? null,
+        // Give it a local id so replying continues it and saves it on this device.
+        activeConversationId: crypto.randomUUID(),
         error: null,
       });
     } catch (err) {
       set({ conversationsError: String(err) });
     }
   },
+  loadLocalConversation: (id) => {
+    const conv = get().localConversations.find((c) => c.id === id);
+    if (!conv) return;
+    set({
+      provider: conv.provider,
+      messages: conv.messages.map((m) => ({ ...m })),
+      activeConversationId: conv.id,
+      activeTitle: conv.title,
+      error: null,
+      pendingAttachments: [],
+    });
+  },
+  deleteLocalConversation: (id) => get().deleteLocalConversations([id]),
+  deleteLocalConversations: (ids) => {
+    const remove = new Set(ids);
+    const next = get().localConversations.filter((c) => !remove.has(c.id));
+    saveLocalConversations(next);
+    set((s) => {
+      const remembered = { ...s.lastConversationByProvider };
+      (Object.keys(remembered) as ProviderId[]).forEach((p) => {
+        if (remembered[p] && remove.has(remembered[p]!)) remembered[p] = null;
+      });
+      return {
+        localConversations: next,
+        lastConversationByProvider: remembered,
+        activeConversationId:
+          s.activeConversationId && remove.has(s.activeConversationId) ? null : s.activeConversationId,
+      };
+    });
+  },
+  clearLocalConversations: () => {
+    saveLocalConversations([]);
+    set({
+      localConversations: [],
+      lastConversationByProvider: { anthropic: null, openai: null },
+      activeConversationId: null,
+    });
+  },
   newConversation: () =>
-    set({ messages: [], activeTitle: null, error: null, pendingAttachments: [] }),
+    set({
+      messages: [],
+      activeTitle: null,
+      activeConversationId: null,
+      error: null,
+      pendingAttachments: [],
+    }),
   connectClaudeWeb: async () => {
     try {
       await invoke("open_claude_login");
@@ -212,9 +324,35 @@ listen<ChunkEvent>("chat://chunk", (event) => {
   }));
 });
 
+// Upsert the live conversation into on-device history so it survives restarts.
+function persistActiveConversation() {
+  const { provider, messages, activeConversationId, activeTitle, localConversations } =
+    useChatStore.getState();
+  if (!provider || !activeConversationId || messages.length === 0) return;
+  const title = activeTitle ?? deriveTitle(messages);
+  // Drop base64 attachment bytes before saving — they'd blow the localStorage
+  // quota fast. The live session keeps them; reopened chats show a file chip.
+  const lean = messages.map((m) =>
+    m.attachments && m.attachments.length > 0
+      ? { ...m, attachments: m.attachments.map((a) => ({ name: a.name, mime: a.mime, dataBase64: "" })) }
+      : m
+  );
+  const entry: LocalConversation = {
+    id: activeConversationId,
+    provider,
+    title,
+    updatedAt: new Date().toISOString(),
+    messages: lean,
+  };
+  const next = [entry, ...localConversations.filter((c) => c.id !== activeConversationId)];
+  saveLocalConversations(next);
+  useChatStore.setState({ localConversations: next, activeTitle: title });
+}
+
 listen<DoneEvent>("chat://done", (event) => {
   pendingRequests.delete(event.payload.requestId);
   useChatStore.setState({ sending: false });
+  persistActiveConversation();
 });
 
 listen<ChatErrorEvent>("chat://error", (event) => {

@@ -92,6 +92,15 @@ export const ChevronDownIcon = ({ className }: IconProps) =>
 export const CheckIcon = ({ className }: IconProps) =>
   base(<path d="M20 6 9 17l-5-5" />, className);
 
+export const CopyIcon = ({ className }: IconProps) =>
+  base(
+    <>
+      <rect x="9" y="9" width="11" height="11" rx="2" />
+      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+    </>,
+    className
+  );
+
 export const SpinnerIcon = ({ className }: IconProps) =>
   base(
     <>

@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540" viewBox="0 0 960 540" role="img" aria-label="Ace demo placeholder">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0d0d0f"/>
+      <stop offset="1" stop-color="#17171b"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#D97757"/>
+      <stop offset="1" stop-color="#10A37F"/>
+    </linearGradient>
+  </defs>
+  <rect width="960" height="540" rx="18" fill="url(#bg)"/>
+  <rect x="1" y="1" width="958" height="538" rx="17" fill="none" stroke="#ffffff" stroke-opacity="0.08"/>
+  <circle cx="480" cy="238" r="58" fill="none" stroke="url(#accent)" stroke-width="4"/>
+  <path d="M462 212 L462 264 L508 238 Z" fill="url(#accent)"/>
+  <text x="480" y="352" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="34" font-weight="600" fill="#f5f5f7">Ace — demo</text>
+  <text x="480" y="392" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="18" fill="#ffffff" fill-opacity="0.45">Replace docs/demo.gif with a screen recording of the app</text>
+</svg>

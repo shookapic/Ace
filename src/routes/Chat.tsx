@@ -1,7 +1,5 @@
 import { AnimatePresence, motion } from "framer-motion";
 import { useEffect, useRef, useState } from "react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 import { invoke } from "@tauri-apps/api/core";
 import { AnthropicLogo, OpenAILogo } from "../components/branding/ProviderLogos";
 import {
@@ -17,6 +15,7 @@ import {
   SpinnerIcon,
   StopIcon,
 } from "../components/ui/Icons";
+import { CopyButton, MarkdownMessage } from "../components/ui/MarkdownMessage";
 import { useAuthStore, type ProviderId } from "../state/authStore";
 import { useChatStore, type ModelInfo } from "../state/chatStore";
 import { useUiStore } from "../state/uiStore";
@@ -160,10 +159,14 @@ export function Chat() {
     removeAttachment,
     fetchConversations,
     loadConversation,
+    localConversations,
+    loadLocalConversation,
+    deleteLocalConversation,
     newConversation,
     connectClaudeWeb,
   } = useChatStore();
   const [input, setInput] = useState("");
+  const [historyQuery, setHistoryQuery] = useState("");
   const [recording, setRecording] = useState(false);
   const [transcribing, setTranscribing] = useState(false);
   const [voiceError, setVoiceError] = useState<string | null>(null);
@@ -329,56 +332,121 @@ export function Chat() {
                 animate={{ opacity: 1, y: 0, scale: 1 }}
                 exit={{ opacity: 0, y: -6, scale: 0.98 }}
                 transition={{ type: "spring", stiffness: 420, damping: 30 }}
-                className="absolute right-2.5 top-full z-40 mt-1 max-h-64 w-64 overflow-y-auto rounded-xl border border-white/10 bg-neutral-950/95 p-1.5 shadow-2xl backdrop-blur-xl"
+                className="absolute right-2.5 top-full z-40 mt-1 flex max-h-80 w-72 flex-col overflow-hidden rounded-xl border border-white/10 bg-neutral-950/95 p-1.5 shadow-2xl backdrop-blur-xl"
               >
-                <p className="px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-white/35">
-                  {provider ? PROVIDER_NAME[provider] : ""} history
-                </p>
-                {conversationsLoading ? (
-                  <p className="px-2 py-2 text-xs text-white/40">Loading…</p>
-                ) : conversationsError ? (
-                  <div className="px-2 py-2">
-                    <p className="text-xs leading-relaxed text-amber-300/80">{conversationsError}</p>
-                    {provider === "anthropic" ? (
-                      <button
-                        type="button"
-                        onClick={() => connectClaudeWeb()}
-                        className="mt-2 w-full rounded-lg bg-[var(--accent)] px-2 py-1.5 text-xs font-medium text-black transition hover:opacity-90"
-                      >
-                        Connect claude.ai
-                      </button>
-                    ) : null}
-                  </div>
-                ) : conversations.length === 0 ? (
-                  <div className="px-2 py-2">
-                    <p className="text-xs text-white/40">No conversations yet.</p>
-                    {provider === "anthropic" ? (
-                      <button
-                        type="button"
-                        onClick={() => connectClaudeWeb()}
-                        className="mt-2 w-full rounded-lg border border-white/12 px-2 py-1.5 text-xs text-white/70 transition hover:border-white/25 hover:text-white"
-                      >
-                        Connect claude.ai
-                      </button>
-                    ) : null}
-                  </div>
-                ) : (
-                  conversations.map((c) => (
-                    <button
-                      key={c.id}
-                      type="button"
-                      onClick={async () => {
-                        if (!provider) return;
-                        setHistoryOpen(false);
-                        await loadConversation(provider, c.id, c.title);
-                      }}
-                      className="block w-full truncate rounded-lg px-2 py-1.5 text-left text-xs text-white/70 transition hover:bg-white/[0.07] hover:text-white"
-                      title={c.title}
-                    >
-                      {c.title}
-                    </button>
-                  ))
-                )}
+                {(() => {
+                  const q = historyQuery.trim().toLowerCase();
+                  const localMatches = localConversations.filter(
+                    (c) => c.provider === provider && (!q || c.title.toLowerCase().includes(q))
+                  );
+                  const remoteMatches = conversations.filter(
+                    (c) => !q || c.title.toLowerCase().includes(q)
+                  );
+                  return (
+                    <>
+                      <div className="mb-1 shrink-0 px-1">
+                        <input
+                          value={historyQuery}
+                          onChange={(e) => setHistoryQuery(e.target.value)}
+                          placeholder="Search conversations"
+                          className="w-full rounded-lg border border-white/10 bg-white/[0.04] px-2.5 py-1.5 text-xs text-white placeholder:text-white/30 focus:border-[color:var(--accent)] focus:outline-none"
+                        />
+                      </div>
+                      <div className="min-h-0 flex-1 overflow-y-auto">
+                        {/* Saved on this device */}
+                        <p className="px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-white/35">
+                          On this device
+                        </p>
+                        {localMatches.length === 0 ? (
+                          <p className="px-2 pb-1 text-[11px] text-white/30">
+                            {q ? "No matches." : "Saved chats appear here."}
+                          </p>
+                        ) : (
+                          localMatches.map((c) => (
+                            <div
+                              key={c.id}
+                              className="group/item flex items-center rounded-lg transition hover:bg-white/[0.07]"
+                            >
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setHistoryOpen(false);
+                                  loadLocalConversation(c.id);
+                                }}
+                                className="min-w-0 flex-1 truncate px-2 py-1.5 text-left text-xs text-white/70 group-hover/item:text-white"
+                                title={c.title}
+                              >
+                                {c.title}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => deleteLocalConversation(c.id)}
+                                aria-label={`Delete ${c.title}`}
+                                className="mr-1 flex h-5 w-5 shrink-0 items-center justify-center rounded text-white/25 opacity-0 transition hover:bg-white/10 hover:text-white/80 group-hover/item:opacity-100"
+                              >
+                                <CloseIcon className="h-3 w-3" />
+                              </button>
+                            </div>
+                          ))
+                        )}
+
+                        {/* Remote (claude.ai / ChatGPT) */}
+                        <p className="mt-1 px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-white/35">
+                          From {provider ? PROVIDER_NAME[provider] : ""}
+                        </p>
+                        {conversationsLoading ? (
+                          <p className="px-2 py-1.5 text-xs text-white/40">Loading…</p>
+                        ) : conversationsError ? (
+                          <div className="px-2 py-1.5">
+                            <p className="text-xs leading-relaxed text-amber-300/80">
+                              {conversationsError}
+                            </p>
+                            {provider === "anthropic" ? (
+                              <button
+                                type="button"
+                                onClick={() => connectClaudeWeb()}
+                                className="mt-2 w-full rounded-lg bg-[var(--accent)] px-2 py-1.5 text-xs font-medium text-black transition hover:opacity-90"
+                              >
+                                Connect claude.ai
+                              </button>
+                            ) : null}
+                          </div>
+                        ) : remoteMatches.length === 0 ? (
+                          <div className="px-2 py-1.5">
+                            <p className="text-xs text-white/40">
+                              {q ? "No matches." : "No conversations."}
+                            </p>
+                            {provider === "anthropic" && !q ? (
+                              <button
+                                type="button"
+                                onClick={() => connectClaudeWeb()}
+                                className="mt-2 w-full rounded-lg border border-white/12 px-2 py-1.5 text-xs text-white/70 transition hover:border-white/25 hover:text-white"
+                              >
+                                Connect claude.ai
+                              </button>
+                            ) : null}
+                          </div>
+                        ) : (
+                          remoteMatches.map((c) => (
+                            <button
+                              key={c.id}
+                              type="button"
+                              onClick={async () => {
+                                if (!provider) return;
+                                setHistoryOpen(false);
+                                await loadConversation(provider, c.id, c.title);
+                              }}
+                              className="block w-full truncate rounded-lg px-2 py-1.5 text-left text-xs text-white/70 transition hover:bg-white/[0.07] hover:text-white"
+                              title={c.title}
+                            >
+                              {c.title}
+                            </button>
+                          ))
+                        )}
+                      </div>
+                    </>
+                  );
+                })()}
               </motion.div>
             </>
           ) : null}
@@ -412,17 +480,45 @@ export function Chat() {
                   key={m.id}
                   className="max-w-[85%] min-w-0 self-end overflow-hidden rounded-2xl rounded-br-md bg-[var(--accent-soft)] px-3.5 py-2 text-sm text-white"
                 >
-                  <div className="prose prose-invert prose-sm max-w-none overflow-hidden break-words [overflow-wrap:anywhere] [&_pre]:overflow-x-auto">
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.content}</ReactMarkdown>
-                  </div>
+                  {m.attachments && m.attachments.length > 0 ? (
+                    <div className="mb-1.5 flex flex-wrap gap-1.5">
+                      {m.attachments.map((att, i) =>
+                        att.mime.startsWith("image/") && att.dataBase64 ? (
+                          <img
+                            key={`${att.name}-${i}`}
+                            src={`data:${att.mime};base64,${att.dataBase64}`}
+                            alt={att.name}
+                            title={att.name}
+                            className="h-16 w-16 rounded-lg border border-white/15 object-cover"
+                          />
+                        ) : (
+                          <span
+                            key={`${att.name}-${i}`}
+                            className="flex items-center gap-1.5 rounded-lg bg-black/20 px-2 py-1 text-[11px] text-white/80"
+                          >
+                            <PaperclipIcon className="h-3 w-3 shrink-0" />
+                            <span className="truncate max-w-[140px]">{att.name}</span>
+                          </span>
+                        )
+                      )}
+                    </div>
+                  ) : null}
+                  {m.content ? (
+                    <div className="max-w-none overflow-hidden break-words [overflow-wrap:anywhere]">
+                      <MarkdownMessage content={m.content} />
+                    </div>
+                  ) : null}
                 </div>
               ) : (
-                <div key={m.id} className="min-w-0 max-w-full self-start px-0.5 text-sm text-white/90">
-                  <div className="prose prose-invert prose-sm max-w-none overflow-hidden break-words [overflow-wrap:anywhere] [&_pre]:overflow-x-auto">
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                      {m.content || (sending ? "…" : "")}
-                    </ReactMarkdown>
+                <div key={m.id} className="group/msg min-w-0 max-w-full self-start px-0.5 text-sm text-white/90">
+                  <div className="max-w-none overflow-hidden break-words [overflow-wrap:anywhere]">
+                    <MarkdownMessage content={m.content || (sending ? "…" : "")} />
                   </div>
+                  {m.content ? (
+                    <div className="mt-1 opacity-0 transition group-hover/msg:opacity-100">
+                      <CopyButton getText={() => m.content} />
+                    </div>
+                  ) : null}
                 </div>
               )
             )}
@@ -441,22 +537,42 @@ export function Chat() {
 
         {pendingAttachments.length > 0 ? (
           <div className="mb-2 flex flex-wrap gap-1.5">
-            {pendingAttachments.map((att, i) => (
-              <span
-                key={`${att.name}-${i}`}
-                className="flex items-center gap-1.5 rounded-lg bg-white/[0.07] py-1 pl-2 pr-1 text-[11px] text-white/70"
-              >
-                <span className="truncate max-w-[140px]">{att.name}</span>
-                <button
-                  type="button"
-                  onClick={() => removeAttachment(i)}
-                  aria-label={`Remove ${att.name}`}
-                  className="flex h-4 w-4 items-center justify-center rounded text-white/40 hover:bg-white/10 hover:text-white"
+            {pendingAttachments.map((att, i) =>
+              att.mime.startsWith("image/") ? (
+                <span key={`${att.name}-${i}`} className="group/att relative h-14 w-14">
+                  <img
+                    src={`data:${att.mime};base64,${att.dataBase64}`}
+                    alt={att.name}
+                    title={att.name}
+                    className="h-14 w-14 rounded-lg border border-white/10 object-cover"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => removeAttachment(i)}
+                    aria-label={`Remove ${att.name}`}
+                    className="absolute -right-1.5 -top-1.5 flex h-5 w-5 items-center justify-center rounded-full border border-white/15 bg-neutral-900 text-white/70 transition hover:text-white"
+                  >
+                    <CloseIcon className="h-3 w-3" />
+                  </button>
+                </span>
+              ) : (
+                <span
+                  key={`${att.name}-${i}`}
+                  className="flex items-center gap-1.5 rounded-lg bg-white/[0.07] py-1 pl-2 pr-1 text-[11px] text-white/70"
                 >
-                  <CloseIcon className="h-3 w-3" />
-                </button>
-              </span>
-            ))}
+                  <PaperclipIcon className="h-3 w-3 shrink-0 text-white/40" />
+                  <span className="truncate max-w-[140px]">{att.name}</span>
+                  <button
+                    type="button"
+                    onClick={() => removeAttachment(i)}
+                    aria-label={`Remove ${att.name}`}
+                    className="flex h-4 w-4 items-center justify-center rounded text-white/40 hover:bg-white/10 hover:text-white"
+                  >
+                    <CloseIcon className="h-3 w-3" />
+                  </button>
+                </span>
+              )
+            )}
           </div>
         ) : null}
         {attachmentsError ? (

@@ -1,6 +1,6 @@
 [package]
 name = "tauri-app"
-version = "0.1.6"
+version = "0.1.7"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
@@ -37,9 +37,13 @@ rfd = "0.15"
 rusqlite = { version = "0.32", features = ["bundled"] }
 dirs = "5"
 tauri-plugin-updater = "2"
+aes-gcm = "0.10"
+
+# xcap (screen capture) pulls PipeWire on Linux — skip it there to avoid the
+# heavy build/runtime dependency. Screenshot is Windows/macOS only.
+[target.'cfg(not(target_os = "linux"))'.dependencies]
 xcap = "0.9.7"
 image = "0.25.10"
-aes-gcm = "0.10"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.58", features = [

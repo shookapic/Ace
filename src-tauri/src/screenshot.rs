@@ -1,6 +1,3 @@
-use std::io::Cursor;
-
-use base64::{engine::general_purpose::STANDARD, Engine};
 use tauri::command;
 
 use crate::chat::Attachment;
@@ -8,8 +5,13 @@ use crate::chat::Attachment;
 /// Capture the primary monitor as a PNG and return it as a chat attachment.
 /// Ace's own window is excluded from capture (WDA_EXCLUDEFROMCAPTURE on Windows),
 /// so it won't appear in its own screenshot.
+#[cfg(not(target_os = "linux"))]
 #[command]
 pub fn capture_screen() -> Result<Attachment, String> {
+    use std::io::Cursor;
+
+    use base64::{engine::general_purpose::STANDARD, Engine};
+
     let monitors = xcap::Monitor::all().map_err(|e| format!("monitor query failed: {e}"))?;
     let monitor = monitors
         .iter()
@@ -31,4 +33,11 @@ pub fn capture_screen() -> Result<Attachment, String> {
         mime: "image/png".to_string(),
         data_base64: STANDARD.encode(&png),
     })
+}
+
+/// Linux screen capture would pull in PipeWire; not supported for now.
+#[cfg(target_os = "linux")]
+#[command]
+pub fn capture_screen() -> Result<Attachment, String> {
+    Err("Screenshot capture isn't supported on Linux yet.".to_string())
 }

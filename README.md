@@ -53,7 +53,7 @@ Grab the latest build for your OS from [Releases](../../releases):
 
 - **Windows** — `Ace_x.y.z_x64-setup.exe` (NSIS) or `Ace_x.y.z_x64_en-US.msi` (MSI). Unsigned, so SmartScreen warns on first run — click **More info → Run anyway**.
 - **Linux** — `Ace_x.y.z_amd64.AppImage` (`chmod +x` then run), or the `.deb` / `.rpm` package.
-- **macOS** — `Ace_x.y.z_aarch64.dmg` (Apple Silicon) or `Ace_x.y.z_x64.dmg` (Intel). **Unsigned** — right-click the app → **Open** on first launch, or run `xattr -cr /Applications/Ace.app`.
+- **macOS** — `Ace_x.y.z_universal.dmg` (runs on both Intel and Apple Silicon). **Unsigned** — right-click the app → **Open** on first launch, or run `xattr -cr /Applications/Ace.app`.
 
 ## Build from source
 

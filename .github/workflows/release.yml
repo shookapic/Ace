@@ -23,12 +23,11 @@ jobs:
           - platform: ubuntu-latest
             args: ""
             rust_target: ""
-          - platform: macos-latest # Apple Silicon
-            args: "--target aarch64-apple-darwin"
-            rust_target: "aarch64-apple-darwin"
-          - platform: macos-13 # Intel
-            args: "--target x86_64-apple-darwin"
-            rust_target: "x86_64-apple-darwin"
+          # One universal DMG (Intel + Apple Silicon) built on the arm64 runner,
+          # avoiding the scarce/slow macos-13 Intel runners.
+          - platform: macos-latest
+            args: "--target universal-apple-darwin"
+            rust_target: "aarch64-apple-darwin,x86_64-apple-darwin"
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4

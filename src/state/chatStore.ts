@@ -52,7 +52,9 @@ export interface LocalConversation {
 
 const STORAGE_KEY = "ace.conversations.v1";
 
-function loadLocalConversations(): LocalConversation[] {
+// Legacy plaintext store — read only, for one-time migration into the encrypted
+// Rust-backed store.
+function readLegacyLocalConversations(): LocalConversation[] {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     return raw ? (JSON.parse(raw) as LocalConversation[]) : [];
@@ -61,12 +63,12 @@ function loadLocalConversations(): LocalConversation[] {
   }
 }
 
+// Persist through the Rust side, which AES-encrypts the blob to disk. Fire and
+// forget — history saving must never block or throw into the UI.
 function saveLocalConversations(list: LocalConversation[]) {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(list));
-  } catch {
-    /* quota exceeded or storage disabled — non-fatal */
-  }
+  invoke("save_conversations", { json: JSON.stringify(list) }).catch((err) =>
+    console.error("save_conversations failed", err)
+  );
 }
 
 function deriveTitle(messages: ChatMessage[]): string {
@@ -94,14 +96,23 @@ interface ChatState {
   localConversations: LocalConversation[];
   activeConversationId: string | null;
   lastConversationByProvider: Record<ProviderId, string | null>;
+  activeRequestId: string | null;
+  compareMode: boolean;
+  compareThreads: Record<ProviderId, ChatMessage[]>;
   setProvider: (provider: ProviderId) => void;
   setModel: (provider: ProviderId, modelId: string) => void;
   fetchModels: (provider: ProviderId) => Promise<void>;
   sendMessage: (text: string) => Promise<void>;
+  toggleCompareMode: () => void;
+  stopStreaming: () => void;
+  regenerateLast: () => Promise<void>;
+  editAndResend: (messageId: string, newText: string) => Promise<void>;
   pickAttachments: () => Promise<void>;
+  captureScreenshot: () => Promise<void>;
   removeAttachment: (index: number) => void;
   fetchConversations: (provider: ProviderId) => Promise<void>;
   loadConversation: (provider: ProviderId, conversationId: string, title?: string) => Promise<void>;
+  hydrateConversations: () => Promise<void>;
   loadLocalConversation: (id: string) => void;
   deleteLocalConversation: (id: string) => void;
   deleteLocalConversations: (ids: string[]) => void;
@@ -113,7 +124,92 @@ interface ChatState {
 // Maps an in-flight requestId to the assistant message it should append streamed
 // text into — event listeners are module-scoped (outside the store), so this is
 // how they find the right message without threading state through every event.
-const pendingRequests = new Map<string, string>();
+// Which thread a streamed response writes into: the single main chat, or one
+// provider's column in compare mode.
+type PendingTarget = "main" | ProviderId;
+const pendingRequests = new Map<string, { assistantId: string; thread: PendingTarget }>();
+
+function toHistory(msgs: ChatMessage[]) {
+  return msgs.map((m) => ({ role: m.role, content: m.content, attachments: m.attachments }));
+}
+
+// Shared send path for the main chat: takes the full thread (already ending at
+// the user turn to answer), appends an assistant placeholder, and kicks off
+// streaming. Used by sendMessage, regenerateLast, and editAndResend.
+async function runCompletion(baseMessages: ChatMessage[]) {
+  const state = useChatStore.getState();
+  const provider = state.provider;
+  if (!provider) return;
+
+  const assistantId = crypto.randomUUID();
+  const requestId = crypto.randomUUID();
+  const conversationId = state.activeConversationId ?? crypto.randomUUID();
+  const model = state.selectedModel[provider] ?? undefined;
+
+  pendingRequests.set(requestId, { assistantId, thread: "main" });
+  useChatStore.setState({
+    messages: [...baseMessages, { id: assistantId, role: "assistant", content: "" }],
+    sending: true,
+    error: null,
+    pendingAttachments: [],
+    activeConversationId: conversationId,
+    activeRequestId: requestId,
+  });
+
+  try {
+    await invoke("send_chat_message", {
+      provider,
+      requestId,
+      model,
+      messages: toHistory(baseMessages),
+    });
+  } catch (err) {
+    pendingRequests.delete(requestId);
+    useChatStore.setState({ sending: false, error: String(err), activeRequestId: null });
+  }
+}
+
+// Compare mode: fan the same user turn out to both providers, each streaming
+// into its own column.
+async function sendCompare(userMessage: ChatMessage) {
+  const state = useChatStore.getState();
+  const providers: ProviderId[] = ["anthropic", "openai"];
+
+  const newThreads = { ...state.compareThreads };
+  const requests: { provider: ProviderId; requestId: string; history: ReturnType<typeof toHistory> }[] = [];
+
+  for (const provider of providers) {
+    const assistantId = crypto.randomUUID();
+    const requestId = crypto.randomUUID();
+    const base = [...state.compareThreads[provider], userMessage];
+    newThreads[provider] = [...base, { id: assistantId, role: "assistant", content: "" }];
+    pendingRequests.set(requestId, { assistantId, thread: provider });
+    requests.push({ provider, requestId, history: toHistory(base) });
+  }
+
+  useChatStore.setState({
+    compareThreads: newThreads,
+    sending: true,
+    error: null,
+    pendingAttachments: [],
+  });
+
+  for (const r of requests) {
+    const model = state.selectedModel[r.provider] ?? undefined;
+    invoke("send_chat_message", {
+      provider: r.provider,
+      requestId: r.requestId,
+      model,
+      messages: r.history,
+    }).catch((err) => {
+      pendingRequests.delete(r.requestId);
+      useChatStore.setState({
+        error: String(err),
+        sending: pendingRequests.size > 0,
+      });
+    });
+  }
+}
 
 export const useChatStore = create<ChatState>((set, get) => ({
   provider: null,
@@ -130,8 +226,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
   conversationsLoading: false,
   conversationsError: null,
   activeTitle: null,
-  localConversations: loadLocalConversations(),
+  localConversations: [],
   activeConversationId: null,
+  activeRequestId: null,
+  compareMode: false,
+  compareThreads: { anthropic: [], openai: [] },
   lastConversationByProvider: { anthropic: null, openai: null },
   // Switching providers parks the current chat and restores the one you last had
   // open for the provider you're switching to — so bouncing between Claude and
@@ -174,10 +273,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
   sendMessage: async (text) => {
-    const provider = get().provider;
+    const state = get();
     const trimmed = text.trim();
-    const attachments = get().pendingAttachments;
-    if (!provider || (!trimmed && attachments.length === 0) || get().sending) return;
+    const attachments = state.pendingAttachments;
+    if ((!trimmed && attachments.length === 0) || state.sending) return;
 
     const userMessage: ChatMessage = {
       id: crypto.randomUUID(),
@@ -185,31 +284,52 @@ export const useChatStore = create<ChatState>((set, get) => ({
       content: trimmed,
       attachments: attachments.length > 0 ? attachments : undefined,
     };
-    const assistantId = crypto.randomUUID();
-    const requestId = crypto.randomUUID();
-    const conversationId = get().activeConversationId ?? crypto.randomUUID();
-    const history = [...get().messages, userMessage].map((m) => ({
-      role: m.role,
-      content: m.content,
-      attachments: m.attachments,
-    }));
-    const model = get().selectedModel[provider] ?? undefined;
 
-    pendingRequests.set(requestId, assistantId);
-    set((s) => ({
-      messages: [...s.messages, userMessage, { id: assistantId, role: "assistant", content: "" }],
-      sending: true,
-      error: null,
-      pendingAttachments: [],
-      activeConversationId: conversationId,
-    }));
-
-    try {
-      await invoke("send_chat_message", { provider, requestId, model, messages: history });
-    } catch (err) {
-      pendingRequests.delete(requestId);
-      set({ sending: false, error: String(err) });
+    if (state.compareMode) {
+      await sendCompare(userMessage);
+      return;
     }
+    if (!state.provider) return;
+    await runCompletion([...state.messages, userMessage]);
+  },
+  toggleCompareMode: () => {
+    const s = get();
+    if (s.sending) return;
+    const next = !s.compareMode;
+    // Seed each column from the current single-chat thread when entering compare.
+    set({
+      compareMode: next,
+      compareThreads: next
+        ? {
+            anthropic: s.messages.map((m) => ({ ...m })),
+            openai: s.messages.map((m) => ({ ...m })),
+          }
+        : s.compareThreads,
+    });
+  },
+  stopStreaming: () => {
+    // Cancels every in-flight request — one in the main chat, or both columns
+    // in compare mode.
+    for (const requestId of pendingRequests.keys()) {
+      invoke("cancel_chat_message", { requestId }).catch(() => {});
+    }
+  },
+  regenerateLast: async () => {
+    if (get().sending) return;
+    const msgs = get().messages;
+    const lastUserIdx = msgs.map((m) => m.role).lastIndexOf("user");
+    if (lastUserIdx === -1) return;
+    // Re-run from the thread up to and including the last user turn, dropping the
+    // assistant answer that followed it.
+    await runCompletion(msgs.slice(0, lastUserIdx + 1));
+  },
+  editAndResend: async (messageId, newText) => {
+    if (get().sending) return;
+    const msgs = get().messages;
+    const idx = msgs.findIndex((m) => m.id === messageId);
+    if (idx === -1 || msgs[idx].role !== "user") return;
+    const edited: ChatMessage = { ...msgs[idx], content: newText.trim() };
+    await runCompletion([...msgs.slice(0, idx), edited]);
   },
   pickAttachments: async () => {
     try {
@@ -217,6 +337,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
       if (picked.length > 0) {
         set((s) => ({ pendingAttachments: [...s.pendingAttachments, ...picked], attachmentsError: null }));
       }
+    } catch (err) {
+      set({ attachmentsError: String(err) });
+    }
+  },
+  captureScreenshot: async () => {
+    try {
+      const shot = await invoke<Attachment>("capture_screen");
+      set((s) => ({ pendingAttachments: [...s.pendingAttachments, shot], attachmentsError: null }));
     } catch (err) {
       set({ attachmentsError: String(err) });
     }
@@ -250,6 +378,28 @@ export const useChatStore = create<ChatState>((set, get) => ({
       });
     } catch (err) {
       set({ conversationsError: String(err) });
+    }
+  },
+  hydrateConversations: async () => {
+    try {
+      const json = await invoke<string>("load_conversations");
+      let list = JSON.parse(json) as LocalConversation[];
+      // One-time migration from the old plaintext localStorage store.
+      if (list.length === 0) {
+        const legacy = readLegacyLocalConversations();
+        if (legacy.length > 0) {
+          list = legacy;
+          saveLocalConversations(list);
+          try {
+            localStorage.removeItem(STORAGE_KEY);
+          } catch {
+            /* ignore */
+          }
+        }
+      }
+      set({ localConversations: list });
+    } catch (err) {
+      console.error("hydrateConversations failed", err);
     }
   },
   loadLocalConversation: (id) => {
@@ -297,6 +447,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       activeConversationId: null,
       error: null,
       pendingAttachments: [],
+      compareThreads: { anthropic: [], openai: [] },
     }),
   connectClaudeWeb: async () => {
     try {
@@ -307,6 +458,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 }));
 
+// Ctrl+Shift+S (fired from Rust) grabs a screenshot into the composer.
+listen("shortcut://screenshot", () => {
+  useChatStore.getState().captureScreenshot();
+});
+
 // When the embedded claude.ai login captures a session, refresh the history list.
 listen("claude-session://ready", () => {
   const { provider, fetchConversations } = useChatStore.getState();
@@ -315,13 +471,15 @@ listen("claude-session://ready", () => {
 
 listen<ChunkEvent>("chat://chunk", (event) => {
   const { requestId, delta } = event.payload;
-  const assistantId = pendingRequests.get(requestId);
-  if (!assistantId) return;
-  useChatStore.setState((s) => ({
-    messages: s.messages.map((m) =>
-      m.id === assistantId ? { ...m, content: m.content + delta } : m
-    ),
-  }));
+  const entry = pendingRequests.get(requestId);
+  if (!entry) return;
+  useChatStore.setState((s) => {
+    const append = (msgs: ChatMessage[]) =>
+      msgs.map((m) => (m.id === entry.assistantId ? { ...m, content: m.content + delta } : m));
+    if (entry.thread === "main") return { messages: append(s.messages) };
+    const provider = entry.thread;
+    return { compareThreads: { ...s.compareThreads, [provider]: append(s.compareThreads[provider]) } };
+  });
 });
 
 // Upsert the live conversation into on-device history so it survives restarts.
@@ -350,21 +508,38 @@ function persistActiveConversation() {
 }
 
 listen<DoneEvent>("chat://done", (event) => {
+  const entry = pendingRequests.get(event.payload.requestId);
   pendingRequests.delete(event.payload.requestId);
-  useChatStore.setState({ sending: false });
-  persistActiveConversation();
+  if (entry?.thread === "main") persistActiveConversation();
+  if (pendingRequests.size === 0) {
+    useChatStore.setState({ sending: false, activeRequestId: null });
+  }
 });
 
 listen<ChatErrorEvent>("chat://error", (event) => {
-  const assistantId = pendingRequests.get(event.payload.requestId);
+  const entry = pendingRequests.get(event.payload.requestId);
   pendingRequests.delete(event.payload.requestId);
-  useChatStore.setState((s) => ({
-    sending: false,
-    error: event.payload.error,
-    // Drop the empty assistant placeholder bubble — nothing streamed into it before the error.
-    messages:
-      assistantId && s.messages.find((m) => m.id === assistantId)?.content === ""
-        ? s.messages.filter((m) => m.id !== assistantId)
-        : s.messages,
-  }));
+  const stillRunning = pendingRequests.size > 0;
+  useChatStore.setState((s) => {
+    const base: Partial<ChatState> = {
+      sending: stillRunning,
+      error: event.payload.error,
+      activeRequestId: stillRunning ? s.activeRequestId : null,
+    };
+    if (!entry) return base;
+    // Drop the empty placeholder bubble — nothing streamed in before the error.
+    if (entry.thread === "main") {
+      const drop = s.messages.find((m) => m.id === entry.assistantId)?.content === "";
+      return { ...base, messages: drop ? s.messages.filter((m) => m.id !== entry.assistantId) : s.messages };
+    }
+    const provider = entry.thread;
+    const thread = s.compareThreads[provider];
+    const drop = thread.find((m) => m.id === entry.assistantId)?.content === "";
+    return {
+      ...base,
+      compareThreads: drop
+        ? { ...s.compareThreads, [provider]: thread.filter((m) => m.id !== entry.assistantId) }
+        : s.compareThreads,
+    };
+  });
 });

@@ -3,13 +3,16 @@ import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { AnthropicLogo, OpenAILogo } from "../components/branding/ProviderLogos";
 import {
+  CameraIcon,
   CheckIcon,
   ChevronDownIcon,
   CloseIcon,
+  CompareIcon,
   HistoryIcon,
   MicIcon,
   PaperclipIcon,
   PlusIcon,
+  RegenerateIcon,
   SendIcon,
   SettingsIcon,
   SpinnerIcon,
@@ -17,8 +20,9 @@ import {
 } from "../components/ui/Icons";
 import { CopyButton, MarkdownMessage } from "../components/ui/MarkdownMessage";
 import { useAuthStore, type ProviderId } from "../state/authStore";
-import { useChatStore, type ModelInfo } from "../state/chatStore";
+import { useChatStore, type ChatMessage, type ModelInfo } from "../state/chatStore";
 import { useUiStore } from "../state/uiStore";
+import { PROVIDER_ACCENT } from "../theme";
 
 function arrayBufferToBase64(buffer: ArrayBuffer): string {
   let binary = "";
@@ -68,16 +72,48 @@ function IconButton({
   );
 }
 
+/** Read-only message list used inside each compare-mode column. */
+function ColumnMessages({ items }: { items: ChatMessage[] }) {
+  if (items.length === 0) {
+    return <p className="mt-2 text-center text-[11px] text-white/25">No messages yet.</p>;
+  }
+  return (
+    <div className="flex flex-col gap-2.5">
+      {items.map((m) =>
+        m.role === "user" ? (
+          <div
+            key={m.id}
+            className="max-w-[92%] self-end break-words rounded-xl rounded-br-sm bg-[var(--accent-soft)] px-2.5 py-1.5 text-[13px] text-white [overflow-wrap:anywhere]"
+          >
+            {m.content ? <MarkdownMessage content={m.content} /> : null}
+          </div>
+        ) : (
+          <div
+            key={m.id}
+            className="min-w-0 break-words text-[13px] text-white/90 [overflow-wrap:anywhere]"
+          >
+            <MarkdownMessage content={m.content || "…"} />
+          </div>
+        )
+      )}
+    </div>
+  );
+}
+
 /** Custom model dropdown — native <select> option lists can't be themed, so we
  * render our own popover that opens upward out of the composer. */
 function ModelPicker({
   models,
   selectedId,
   onSelect,
+  direction = "up",
+  align = "left",
 }: {
   models: ModelInfo[];
   selectedId: string | null;
   onSelect: (id: string) => void;
+  direction?: "up" | "down";
+  align?: "left" | "right";
 }) {
   const [open, setOpen] = useState(false);
   const selected = models.find((m) => m.id === selectedId);
@@ -102,7 +138,9 @@ function ModelPicker({
               animate={{ opacity: 1, y: 0, scale: 1 }}
               exit={{ opacity: 0, y: 6, scale: 0.98 }}
               transition={{ type: "spring", stiffness: 460, damping: 32 }}
-              className="absolute bottom-full left-0 z-50 mb-1.5 max-h-60 w-52 overflow-y-auto rounded-xl border border-white/10 bg-neutral-950/95 p-1 shadow-2xl backdrop-blur-xl"
+              className={`absolute z-50 max-h-60 w-56 overflow-y-auto rounded-xl border border-white/10 bg-neutral-950/95 p-1 shadow-2xl backdrop-blur-xl ${
+                direction === "down" ? "top-full mt-1.5" : "bottom-full mb-1.5"
+              } ${align === "right" ? "right-0" : "left-0"}`}
             >
               {models.map((m) => {
                 const active = m.id === selectedId;
@@ -114,14 +152,14 @@ function ModelPicker({
                       onSelect(m.id);
                       setOpen(false);
                     }}
-                    className={`flex w-full items-center justify-between gap-2 rounded-lg px-2.5 py-1.5 text-left text-xs transition ${
+                    className={`flex w-full items-start justify-between gap-2 rounded-lg px-2.5 py-1.5 text-left text-xs transition ${
                       active
                         ? "bg-[var(--accent-soft)] text-[color:var(--accent)]"
                         : "text-white/70 hover:bg-white/[0.07] hover:text-white"
                     }`}
                   >
-                    <span className="truncate">{m.label}</span>
-                    {active ? <CheckIcon className="h-3.5 w-3.5 shrink-0" /> : null}
+                    <span className="min-w-0 flex-1 break-words">{m.label}</span>
+                    {active ? <CheckIcon className="mt-0.5 h-3.5 w-3.5 shrink-0" /> : null}
                   </button>
                 );
               })}
@@ -155,7 +193,11 @@ export function Chat() {
     setModel,
     fetchModels,
     sendMessage,
+    stopStreaming,
+    regenerateLast,
+    editAndResend,
     pickAttachments,
+    captureScreenshot,
     removeAttachment,
     fetchConversations,
     loadConversation,
@@ -164,9 +206,14 @@ export function Chat() {
     deleteLocalConversation,
     newConversation,
     connectClaudeWeb,
+    compareMode,
+    compareThreads,
+    toggleCompareMode,
   } = useChatStore();
   const [input, setInput] = useState("");
   const [historyQuery, setHistoryQuery] = useState("");
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editText, setEditText] = useState("");
   const [recording, setRecording] = useState(false);
   const [transcribing, setTranscribing] = useState(false);
   const [voiceError, setVoiceError] = useState<string | null>(null);
@@ -199,6 +246,14 @@ export function Chat() {
     if (provider && models[provider].length === 0 && !modelsLoading) fetchModels(provider);
   }, [provider, models, modelsLoading, fetchModels]);
 
+  // Compare mode talks to both providers, so make sure both model lists are loaded.
+  useEffect(() => {
+    if (!compareMode) return;
+    connected.forEach((id) => {
+      if (models[id].length === 0) fetchModels(id);
+    });
+  }, [compareMode, connected, models, fetchModels]);
+
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [messages]);
@@ -207,6 +262,12 @@ export function Chat() {
     const text = input;
     setInput("");
     await sendMessage(text);
+  }
+
+  function submitEdit(messageId: string) {
+    const text = editText.trim();
+    setEditingId(null);
+    if (text) editAndResend(messageId, text);
   }
 
   async function toggleRecording() {
@@ -256,8 +317,8 @@ export function Chat() {
       transition={{ duration: 0.35 }}
     >
       {/* Header: provider identity · title · actions */}
-      <header className="relative flex h-11 shrink-0 items-center justify-between px-2.5">
-        <div className="flex items-center gap-0.5">
+      <header className="relative flex h-11 shrink-0 items-center gap-1 px-2.5">
+        <div className="flex shrink-0 items-center gap-0.5">
           {connected.map((id) => {
             const Logo = LOGOS[id];
             const isActive = provider === id;
@@ -296,13 +357,20 @@ export function Chat() {
           })}
         </div>
 
-        {activeTitle ? (
-          <span className="pointer-events-none absolute left-1/2 max-w-[45%] -translate-x-1/2 truncate text-[11px] text-white/40">
-            {activeTitle}
-          </span>
-        ) : null}
+        <span className="min-w-0 flex-1 truncate text-center text-[11px] text-white/40">
+          {compareMode ? "" : activeTitle ?? ""}
+        </span>
 
-        <div className="flex items-center gap-0.5">
+        <div className="flex shrink-0 items-center gap-0.5">
+          {connected.length === 2 ? (
+            <IconButton
+              onClick={toggleCompareMode}
+              label="Compare Claude and OpenAI"
+              active={compareMode}
+            >
+              <CompareIcon className="h-[18px] w-[18px]" />
+            </IconButton>
+          ) : null}
           <IconButton onClick={newConversation} label="New chat">
             <PlusIcon className="h-[18px] w-[18px]" />
           </IconButton>
@@ -454,6 +522,37 @@ export function Chat() {
       </header>
 
       {/* Messages */}
+      {compareMode ? (
+        <div className="grid min-h-0 flex-1 grid-cols-2 gap-2 px-2 py-3">
+          {(["anthropic", "openai"] as ProviderId[]).map((pid) => {
+            const Logo = LOGOS[pid];
+            return (
+              <div key={pid} className="flex min-h-0 flex-col rounded-xl border border-white/10">
+                <div className="relative z-10 flex shrink-0 items-center gap-1.5 border-b border-white/10 px-2 py-1">
+                  <span style={{ color: PROVIDER_ACCENT[pid].hex }}>
+                    <Logo className="h-3.5 w-3.5" />
+                  </span>
+                  <span className="shrink-0 text-[11px] font-medium text-white/60">{PROVIDER_NAME[pid]}</span>
+                  <div className="ml-auto min-w-0">
+                    {models[pid].length > 0 ? (
+                      <ModelPicker
+                        models={models[pid]}
+                        selectedId={selectedModel[pid]}
+                        onSelect={(id) => setModel(pid, id)}
+                        direction="down"
+                        align={pid === "anthropic" ? "left" : "right"}
+                      />
+                    ) : null}
+                  </div>
+                </div>
+                <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden rounded-b-xl px-2.5 py-2">
+                  <ColumnMessages items={compareThreads[pid]} />
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      ) : (
       <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-3.5 py-3">
         {messages.length === 0 ? (
           <div className="flex h-full flex-col items-center justify-center gap-3 text-center">
@@ -474,11 +573,11 @@ export function Chat() {
           </div>
         ) : (
           <div className="flex flex-col gap-3">
-            {messages.map((m) =>
+            {messages.map((m, i) =>
               m.role === "user" ? (
                 <div
                   key={m.id}
-                  className="max-w-[85%] min-w-0 self-end overflow-hidden rounded-2xl rounded-br-md bg-[var(--accent-soft)] px-3.5 py-2 text-sm text-white"
+                  className="group/msg max-w-[85%] min-w-0 self-end overflow-hidden rounded-2xl rounded-br-md bg-[var(--accent-soft)] px-3.5 py-2 text-sm text-white"
                 >
                   {m.attachments && m.attachments.length > 0 ? (
                     <div className="mb-1.5 flex flex-wrap gap-1.5">
@@ -503,9 +602,57 @@ export function Chat() {
                       )}
                     </div>
                   ) : null}
-                  {m.content ? (
+                  {editingId === m.id ? (
+                    <div className="flex flex-col gap-1.5">
+                      <textarea
+                        value={editText}
+                        onChange={(e) => setEditText(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" && !e.shiftKey) {
+                            e.preventDefault();
+                            submitEdit(m.id);
+                          } else if (e.key === "Escape") {
+                            setEditingId(null);
+                          }
+                        }}
+                        rows={2}
+                        autoFocus
+                        className="w-full resize-none rounded-lg bg-black/25 px-2 py-1.5 text-sm text-white focus:outline-none"
+                      />
+                      <div className="flex justify-end gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => setEditingId(null)}
+                          className="rounded-md px-2 py-1 text-[11px] text-white/60 hover:text-white"
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => submitEdit(m.id)}
+                          className="rounded-md bg-black/30 px-2 py-1 text-[11px] font-medium text-white hover:bg-black/45"
+                        >
+                          Send
+                        </button>
+                      </div>
+                    </div>
+                  ) : m.content ? (
                     <div className="max-w-none overflow-hidden break-words [overflow-wrap:anywhere]">
                       <MarkdownMessage content={m.content} />
+                    </div>
+                  ) : null}
+                  {editingId !== m.id && m.content && !sending ? (
+                    <div className="mt-1 flex justify-end opacity-0 transition group-hover/msg:opacity-100">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEditingId(m.id);
+                          setEditText(m.content);
+                        }}
+                        className="rounded-md border border-white/15 bg-black/20 px-1.5 py-1 text-[11px] text-white/70 hover:text-white"
+                      >
+                        Edit
+                      </button>
                     </div>
                   ) : null}
                 </div>
@@ -515,8 +662,18 @@ export function Chat() {
                     <MarkdownMessage content={m.content || (sending ? "…" : "")} />
                   </div>
                   {m.content ? (
-                    <div className="mt-1 opacity-0 transition group-hover/msg:opacity-100">
+                    <div className="mt-1 flex items-center gap-1 opacity-0 transition group-hover/msg:opacity-100">
                       <CopyButton getText={() => m.content} />
+                      {i === messages.length - 1 && !sending ? (
+                        <button
+                          type="button"
+                          onClick={() => regenerateLast()}
+                          aria-label="Regenerate response"
+                          className="flex items-center gap-1 rounded-md border border-white/10 bg-white/5 px-1.5 py-1 text-[11px] text-white/60 transition hover:bg-white/10 hover:text-white/90"
+                        >
+                          <RegenerateIcon className="h-3.5 w-3.5" />
+                        </button>
+                      ) : null}
                     </div>
                   ) : null}
                 </div>
@@ -525,6 +682,7 @@ export function Chat() {
           </div>
         )}
       </div>
+      )}
 
       {/* Composer */}
       <div className="shrink-0 px-3 pb-3 pt-1">
@@ -599,6 +757,9 @@ export function Chat() {
               <IconButton onClick={() => pickAttachments()} label="Attach files">
                 <PaperclipIcon className="h-[18px] w-[18px]" />
               </IconButton>
+              <IconButton onClick={() => captureScreenshot()} label="Screenshot (Ctrl+Shift+S)">
+                <CameraIcon className="h-[18px] w-[18px]" />
+              </IconButton>
               <IconButton
                 onClick={toggleRecording}
                 disabled={!openaiConnected || transcribing}
@@ -620,7 +781,7 @@ export function Chat() {
                 )}
               </IconButton>
 
-              {provider && models[provider].length > 0 ? (
+              {compareMode ? null : provider && models[provider].length > 0 ? (
                 <ModelPicker
                   models={models[provider]}
                   selectedId={selectedModel[provider]}
@@ -635,16 +796,28 @@ export function Chat() {
               ) : null}
             </div>
 
-            <motion.button
-              type="button"
-              onClick={handleSend}
-              disabled={!canSend}
-              aria-label="Send message"
-              whileTap={canSend ? { scale: 0.9 } : undefined}
-              className="flex h-8 w-8 items-center justify-center rounded-full bg-[var(--accent)] text-black transition disabled:bg-white/[0.08] disabled:text-white/25"
-            >
-              <SendIcon className="h-[18px] w-[18px]" />
-            </motion.button>
+            {sending ? (
+              <motion.button
+                type="button"
+                onClick={stopStreaming}
+                aria-label="Stop generating"
+                whileTap={{ scale: 0.9 }}
+                className="flex h-8 w-8 items-center justify-center rounded-full bg-[var(--accent)] text-black transition"
+              >
+                <StopIcon className="h-[15px] w-[15px]" />
+              </motion.button>
+            ) : (
+              <motion.button
+                type="button"
+                onClick={handleSend}
+                disabled={!canSend}
+                aria-label="Send message"
+                whileTap={canSend ? { scale: 0.9 } : undefined}
+                className="flex h-8 w-8 items-center justify-center rounded-full bg-[var(--accent)] text-black transition disabled:bg-white/[0.08] disabled:text-white/25"
+              >
+                <SendIcon className="h-[18px] w-[18px]" />
+              </motion.button>
+            )}
           </div>
         </div>
       </div>

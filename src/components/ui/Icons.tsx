@@ -92,6 +92,35 @@ export const ChevronDownIcon = ({ className }: IconProps) =>
 export const CheckIcon = ({ className }: IconProps) =>
   base(<path d="M20 6 9 17l-5-5" />, className);
 
+export const CompareIcon = ({ className }: IconProps) =>
+  base(
+    <>
+      <rect x="3" y="4" width="7" height="16" rx="1.5" />
+      <rect x="14" y="4" width="7" height="16" rx="1.5" />
+    </>,
+    className
+  );
+
+export const CameraIcon = ({ className }: IconProps) =>
+  base(
+    <>
+      <path d="M3 8a2 2 0 0 1 2-2h1.2a1 1 0 0 0 .8-.4l.9-1.2a1 1 0 0 1 .8-.4h4.6a1 1 0 0 1 .8.4l.9 1.2a1 1 0 0 0 .8.4H19a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+      <circle cx="12" cy="13" r="3.2" />
+    </>,
+    className
+  );
+
+export const RegenerateIcon = ({ className }: IconProps) =>
+  base(
+    <>
+      <path d="M3 12a9 9 0 0 1 15-6.7L21 8" />
+      <path d="M21 3v5h-5" />
+      <path d="M21 12a9 9 0 0 1-15 6.7L3 16" />
+      <path d="M3 21v-5h5" />
+    </>,
+    className
+  );
+
 export const CopyIcon = ({ className }: IconProps) =>
   base(
     <>

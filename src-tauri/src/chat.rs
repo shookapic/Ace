@@ -1,11 +1,18 @@
+use std::collections::HashMap;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use base64::{engine::general_purpose::STANDARD, Engine};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use tauri::{command, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
+use tokio_util::sync::CancellationToken;
 
 use crate::auth::{chatgpt_account_id, load_token};
+
+/// Tracks in-flight chat requests so they can be cancelled by `request_id`.
+#[derive(Default)]
+pub struct ChatCancels(pub Mutex<HashMap<String, CancellationToken>>);
 
 fn short_timeout_client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
@@ -24,9 +31,9 @@ fn streaming_client() -> Result<reqwest::Client, String> {
 #[derive(Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Attachment {
-    name: String,
-    mime: String,
-    data_base64: String,
+    pub name: String,
+    pub mime: String,
+    pub data_base64: String,
 }
 
 #[derive(Deserialize, Clone)]
@@ -835,12 +842,21 @@ pub async fn send_chat_message(
     let token = load_token(&provider)
         .ok_or_else(|| format!("no stored credentials for {provider} — sign in first"))?;
 
+    let cancel = CancellationToken::new();
+    if let Ok(mut map) = app.state::<ChatCancels>().0.lock() {
+        map.insert(request_id.clone(), cancel.clone());
+    }
+
     tauri::async_runtime::spawn(async move {
         let result = match provider.as_str() {
-            "openai" => stream_openai(&app, &request_id, &token.access_token, &token.id_token, model.as_deref(), &messages).await,
-            "anthropic" => stream_anthropic(&app, &request_id, &token.access_token, model.as_deref(), &messages).await,
+            "openai" => stream_openai(&app, &request_id, &token.access_token, &token.id_token, model.as_deref(), &messages, &cancel).await,
+            "anthropic" => stream_anthropic(&app, &request_id, &token.access_token, model.as_deref(), &messages, &cancel).await,
             other => Err(format!("unsupported chat provider: {other}")),
         };
+
+        if let Ok(mut map) = app.state::<ChatCancels>().0.lock() {
+            map.remove(&request_id);
+        }
 
         match result {
             Ok(()) => {
@@ -859,6 +875,17 @@ pub async fn send_chat_message(
     Ok(())
 }
 
+/// Cancel an in-flight chat stream; the stream loop breaks and finalizes the
+/// partial response via the usual `chat://done` path.
+#[command]
+pub fn cancel_chat_message(app: tauri::AppHandle, request_id: String) {
+    if let Ok(map) = app.state::<ChatCancels>().0.lock() {
+        if let Some(token) = map.get(&request_id) {
+            token.cancel();
+        }
+    }
+}
+
 fn decode_text_attachment(att: &Attachment) -> Option<String> {
     let bytes = STANDARD.decode(&att.data_base64).ok()?;
     String::from_utf8(bytes).ok()
@@ -871,6 +898,7 @@ async fn stream_openai(
     id_token: &Option<String>,
     model: Option<&str>,
     messages: &[ChatMessage],
+    cancel: &CancellationToken,
 ) -> Result<(), String> {
     let account_id = id_token
         .as_deref()
@@ -938,8 +966,14 @@ async fn stream_openai(
     let mut stream = response.bytes_stream();
     let mut buffer = String::new();
 
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| format!("stream read failed: {e}"))?;
+    loop {
+        let chunk = tokio::select! {
+            _ = cancel.cancelled() => break,
+            next = stream.next() => match next {
+                Some(c) => c.map_err(|e| format!("stream read failed: {e}"))?,
+                None => break,
+            },
+        };
         buffer.push_str(&String::from_utf8_lossy(&chunk));
 
         while let Some(pos) = buffer.find("\n\n") {
@@ -977,6 +1011,7 @@ async fn stream_anthropic(
     access_token: &str,
     model: Option<&str>,
     messages: &[ChatMessage],
+    cancel: &CancellationToken,
 ) -> Result<(), String> {
     let system_blocks = vec![
         serde_json::json!({
@@ -1053,8 +1088,14 @@ async fn stream_anthropic(
     let mut stream = response.bytes_stream();
     let mut buffer = String::new();
 
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| format!("stream read failed: {e}"))?;
+    loop {
+        let chunk = tokio::select! {
+            _ = cancel.cancelled() => break,
+            next = stream.next() => match next {
+                Some(c) => c.map_err(|e| format!("stream read failed: {e}"))?,
+                None => break,
+            },
+        };
         buffer.push_str(&String::from_utf8_lossy(&chunk));
 
         while let Some(pos) = buffer.find("\n\n") {

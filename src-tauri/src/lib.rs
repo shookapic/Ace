@@ -1,20 +1,93 @@
 mod auth;
 mod chat;
+mod history;
+mod screenshot;
 mod window;
 
+use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Mutex;
 
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{command, Manager};
+use tauri::{command, Emitter, Manager};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
-const DEFAULT_MODS: Modifiers = Modifiers::CONTROL.union(Modifiers::SHIFT);
-const DEFAULT_CODE: Code = Code::KeyA;
+const MODS: Modifiers = Modifiers::CONTROL.union(Modifiers::SHIFT);
+
+// Action names shared with the frontend. Each maps to a user-rebindable global
+// shortcut; the defaults are Ctrl+Shift+{A,X,S}.
+const ACTION_TOGGLE: &str = "toggle";
+const ACTION_CLICK_THROUGH: &str = "click_through";
+const ACTION_SCREENSHOT: &str = "screenshot";
+
+fn default_shortcuts() -> HashMap<String, Shortcut> {
+    let mut m = HashMap::new();
+    m.insert(ACTION_TOGGLE.to_string(), Shortcut::new(Some(MODS), Code::KeyA));
+    m.insert(ACTION_CLICK_THROUGH.to_string(), Shortcut::new(Some(MODS), Code::KeyX));
+    m.insert(ACTION_SCREENSHOT.to_string(), Shortcut::new(Some(MODS), Code::KeyS));
+    m
+}
+
+/// Maps each action to its currently-bound global shortcut.
+struct ShortcutBindings(Mutex<HashMap<String, Shortcut>>);
+
+impl Default for ShortcutBindings {
+    fn default() -> Self {
+        ShortcutBindings(Mutex::new(default_shortcuts()))
+    }
+}
+
+/// Clear and re-register every bound shortcut. Duplicate/among-conflicting binds
+/// just get skipped with a log rather than aborting the whole set.
+fn reregister_shortcuts(app: &tauri::AppHandle, map: &HashMap<String, Shortcut>) {
+    let _ = app.global_shortcut().unregister_all();
+    for (action, sc) in map {
+        if let Err(e) = app.global_shortcut().register(*sc) {
+            eprintln!("could not register shortcut for {action}: {e}");
+        }
+    }
+}
+
+fn dispatch_shortcut(app: &tauri::AppHandle, action: &str) {
+    match action {
+        ACTION_TOGGLE => toggle_main_window(app),
+        ACTION_CLICK_THROUGH => toggle_click_through(app),
+        ACTION_SCREENSHOT => {
+            let _ = app.emit("shortcut://screenshot", ());
+        }
+        _ => {}
+    }
+}
 
 #[derive(Default)]
-struct ToggleShortcutState(Mutex<Option<Shortcut>>);
+struct ClickThroughState(Mutex<bool>);
+
+fn set_click_through_internal(app: &tauri::AppHandle, enabled: bool) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.set_ignore_cursor_events(enabled);
+    }
+    if let Ok(mut guard) = app.state::<ClickThroughState>().0.lock() {
+        *guard = enabled;
+    }
+    // Keep the frontend toggle in sync when tray/shortcut flips this.
+    let _ = app.emit("window://click-through", enabled);
+}
+
+fn toggle_click_through(app: &tauri::AppHandle) {
+    let current = app
+        .state::<ClickThroughState>()
+        .0
+        .lock()
+        .map(|g| *g)
+        .unwrap_or(false);
+    set_click_through_internal(app, !current);
+}
+
+#[command]
+fn set_click_through(app: tauri::AppHandle, enabled: bool) {
+    set_click_through_internal(&app, enabled);
+}
 
 fn show_main_window(app: &tauri::AppHandle) {
     let Some(window) = app.get_webview_window("main") else { return };
@@ -39,9 +112,12 @@ fn toggle_main_window(app: &tauri::AppHandle) {
     }
 }
 
+/// Rebind one action's global shortcut. Fails only if the combo is invalid or
+/// the OS refuses it (e.g. another app already owns it), so the UI can report it.
 #[command]
-fn set_toggle_shortcut(
+fn set_action_shortcut(
     app: tauri::AppHandle,
+    action: String,
     ctrl: bool,
     shift: bool,
     alt: bool,
@@ -66,17 +142,18 @@ fn set_toggle_shortcut(
 
     let shortcut = Shortcut::new(if mods.is_empty() { None } else { Some(mods) }, key);
 
-    let state = app.state::<ToggleShortcutState>();
-    let mut guard = state.0.lock().map_err(|_| "shortcut lock poisoned".to_string())?;
+    let state = app.state::<ShortcutBindings>();
+    let mut map = state.0.lock().map_err(|_| "shortcut lock poisoned".to_string())?;
 
-    app.global_shortcut()
-        .unregister_all()
-        .map_err(|e| format!("failed to clear previous shortcut: {e}"))?;
+    // Validate the new combo in isolation first so we can surface a clear error
+    // (e.g. taken by another app) without disturbing the other bindings.
+    let _ = app.global_shortcut().unregister(shortcut);
     app.global_shortcut()
         .register(shortcut)
-        .map_err(|e| format!("failed to register shortcut: {e}"))?;
+        .map_err(|e| format!("that combo is unavailable (maybe another app uses it): {e}"))?;
 
-    *guard = Some(shortcut);
+    map.insert(action, shortcut);
+    reregister_shortcuts(&app, &map);
     Ok(())
 }
 
@@ -92,22 +169,30 @@ pub fn run() {
                     if event.state() != ShortcutState::Pressed {
                         return;
                     }
-                    let state = app.state::<ToggleShortcutState>();
-                    let Ok(guard) = state.0.lock() else { return };
-                    if guard.as_ref() != Some(shortcut) {
-                        return;
+                    // Find which action this shortcut is bound to and dispatch it.
+                    let action = {
+                        let state = app.state::<ShortcutBindings>();
+                        let Ok(map) = state.0.lock() else { return };
+                        map.iter()
+                            .find(|(_, sc)| *sc == shortcut)
+                            .map(|(a, _)| a.clone())
+                    };
+                    if let Some(action) = action {
+                        dispatch_shortcut(app, &action);
                     }
-                    toggle_main_window(app);
                 })
                 .build(),
         )
-        .manage(ToggleShortcutState::default())
+        .manage(ShortcutBindings::default())
+        .manage(ClickThroughState::default())
         .manage(chat::ClaudeWebSession::default())
+        .manage(chat::ChatCancels::default())
         .invoke_handler(tauri::generate_handler![
             auth::start_oauth_login,
             auth::get_auth_status,
             auth::sign_out,
             chat::send_chat_message,
+            chat::cancel_chat_message,
             chat::list_models,
             chat::pick_files,
             chat::transcribe_audio,
@@ -116,7 +201,11 @@ pub fn run() {
             chat::open_claude_login,
             window::effects::set_window_opacity,
             window::effects::set_capture_hidden,
-            set_toggle_shortcut,
+            set_action_shortcut,
+            set_click_through,
+            screenshot::capture_screen,
+            history::load_conversations,
+            history::save_conversations,
         ])
         .setup(|app| {
             let main_window = app.get_webview_window("main").expect("main window missing");
@@ -132,15 +221,24 @@ pub fn run() {
             // Default to fully opaque on launch.
             let _ = window::effects::set_window_opacity(main_window, 1.0);
 
-            let default_shortcut = Shortcut::new(Some(DEFAULT_MODS), DEFAULT_CODE);
-            app.global_shortcut().register(default_shortcut)?;
-            *app.state::<ToggleShortcutState>().0.lock().unwrap() = Some(default_shortcut);
+            // Register the default binds; the frontend re-applies any custom ones
+            // it has saved once it mounts.
+            if let Ok(map) = app.state::<ShortcutBindings>().0.lock() {
+                reregister_shortcuts(app.handle(), &map);
+            }
 
             // System-tray icon: left-click toggles the window; the menu offers an
             // explicit Show and Quit. Hiding parks Ace here instead of the taskbar.
             let show_item = MenuItem::with_id(app, "show", "Show Ace", true, None::<&str>)?;
+            let click_through_item = MenuItem::with_id(
+                app,
+                "toggle_click_through",
+                "Toggle click-through",
+                true,
+                None::<&str>,
+            )?;
             let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
+            let menu = Menu::with_items(app, &[&show_item, &click_through_item, &quit_item])?;
 
             let mut tray = TrayIconBuilder::new()
                 .tooltip("Ace")
@@ -148,6 +246,7 @@ pub fn run() {
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "show" => show_main_window(app),
+                    "toggle_click_through" => toggle_click_through(app),
                     "quit" => app.exit(0),
                     _ => {}
                 })

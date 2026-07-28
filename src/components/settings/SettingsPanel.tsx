@@ -5,7 +5,13 @@ import { useAuthStore, type ProviderId } from "../../state/authStore";
 import { useChatStore } from "../../state/chatStore";
 import { useUiStore } from "../../state/uiStore";
 import { useUpdateStore } from "../../state/updateStore";
-import { shortcutLabel, useWindowStore, type ToggleShortcut } from "../../state/windowStore";
+import {
+  SHORTCUT_LABELS,
+  shortcutLabel,
+  useWindowStore,
+  type ShortcutAction,
+  type ToggleShortcut,
+} from "../../state/windowStore";
 
 const PROVIDER_LABEL: Record<ProviderId, string> = {
   anthropic: "Claude",
@@ -33,9 +39,9 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
   );
 }
 
-function ShortcutRecorder() {
-  const toggleShortcut = useWindowStore((s) => s.toggleShortcut);
-  const applyToggleShortcut = useWindowStore((s) => s.applyToggleShortcut);
+function ShortcutRecorder({ action }: { action: ShortcutAction }) {
+  const combo = useWindowStore((s) => s.shortcuts[action]);
+  const applyShortcut = useWindowStore((s) => s.applyShortcut);
   const [capturing, setCapturing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -51,7 +57,7 @@ function ShortcutRecorder() {
       }
       if (MODIFIER_CODES.has(e.code)) return;
 
-      const combo: ToggleShortcut = {
+      const next: ToggleShortcut = {
         ctrl: e.ctrlKey,
         shift: e.shiftKey,
         alt: e.altKey,
@@ -59,7 +65,7 @@ function ShortcutRecorder() {
         code: e.code,
       };
       cleanup();
-      applyToggleShortcut(combo).catch((err) => setError(String(err)));
+      applyShortcut(action, next).catch((err) => setError(String(err)));
     };
 
     const cleanup = () => {
@@ -71,20 +77,34 @@ function ShortcutRecorder() {
   };
 
   return (
-    <div className="flex flex-col gap-1.5">
-      <SectionLabel>Show / hide shortcut</SectionLabel>
-      <button
-        type="button"
-        onClick={startCapture}
-        className={`rounded-lg border px-2.5 py-1.5 text-xs font-medium transition ${
-          capturing
-            ? "border-[color:var(--accent)] text-[color:var(--accent)]"
-            : "border-white/12 text-white/80 hover:border-white/25"
-        }`}
-      >
-        {capturing ? "Press a key combo… (Esc to cancel)" : shortcutLabel(toggleShortcut)}
-      </button>
-      {error ? <span className="text-[10px] text-red-400">{error}</span> : null}
+    <div className="flex items-center justify-between gap-2">
+      <span className="text-xs text-white/70">{SHORTCUT_LABELS[action]}</span>
+      <div className="flex flex-col items-end gap-0.5">
+        <button
+          type="button"
+          onClick={startCapture}
+          className={`rounded-lg border px-2.5 py-1 text-[11px] font-medium tabular-nums transition ${
+            capturing
+              ? "border-[color:var(--accent)] text-[color:var(--accent)]"
+              : "border-white/12 text-white/80 hover:border-white/25"
+          }`}
+        >
+          {capturing ? "Press keys… (Esc)" : shortcutLabel(combo)}
+        </button>
+        {error ? <span className="max-w-[180px] text-right text-[10px] text-red-400">{error}</span> : null}
+      </div>
+    </div>
+  );
+}
+
+function ShortcutsSection() {
+  const actions: ShortcutAction[] = ["toggle", "click_through", "screenshot"];
+  return (
+    <div className="flex flex-col gap-2 border-t border-white/10 pt-3">
+      <SectionLabel>Keyboard shortcuts</SectionLabel>
+      {actions.map((action) => (
+        <ShortcutRecorder key={action} action={action} />
+      ))}
     </div>
   );
 }
@@ -223,6 +243,8 @@ export function SettingsPanel() {
   const setOpacity = useWindowStore((s) => s.setOpacity);
   const captureHidden = useWindowStore((s) => s.captureHidden);
   const setCaptureHidden = useWindowStore((s) => s.setCaptureHidden);
+  const clickThrough = useWindowStore((s) => s.clickThrough);
+  const setClickThrough = useWindowStore((s) => s.setClickThrough);
   const providers = useAuthStore((s) => s.providers);
   const signOut = useAuthStore((s) => s.signOut);
 
@@ -294,7 +316,22 @@ export function SettingsPanel() {
                 />
               </label>
 
-              <ShortcutRecorder />
+              <label className="flex cursor-pointer items-center justify-between">
+                <div className="flex flex-col">
+                  <span className="text-xs font-medium text-white/90">Click-through mode</span>
+                  <span className="text-[10px] text-white/40">
+                    Mouse passes through to what's behind — restore with the tray or Ctrl+Shift+X
+                  </span>
+                </div>
+                <input
+                  type="checkbox"
+                  checked={clickThrough}
+                  onChange={(e) => setClickThrough(e.target.checked)}
+                  className="h-4 w-4 accent-[color:var(--accent)]"
+                />
+              </label>
+
+              <ShortcutsSection />
 
               <LocalChatsManager />
 

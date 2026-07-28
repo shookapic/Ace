@@ -18,8 +18,9 @@ function App() {
   const providers = useAuthStore((s) => s.providers);
   const refreshStatus = useAuthStore((s) => s.refreshStatus);
   const activeProvider = useChatStore((s) => s.provider);
-  const toggleShortcut = useWindowStore((s) => s.toggleShortcut);
-  const applyToggleShortcut = useWindowStore((s) => s.applyToggleShortcut);
+  const hydrateConversations = useChatStore((s) => s.hydrateConversations);
+  const applyAllShortcuts = useWindowStore((s) => s.applyAllShortcuts);
+  const applyStoredWindowPrefs = useWindowStore((s) => s.applyStoredWindowPrefs);
   const checkForUpdate = useUpdateStore((s) => s.checkForUpdate);
   const accent = activeProvider ? PROVIDER_ACCENT[activeProvider] : NEUTRAL_ACCENT;
 
@@ -30,9 +31,12 @@ function App() {
   }, [refreshStatus]);
 
   useEffect(() => {
-    applyToggleShortcut(toggleShortcut).catch((err) =>
-      console.error("failed to register toggle shortcut", err)
-    );
+    applyAllShortcuts();
+    // Restore the user's saved opacity / capture-hide / click-through choices,
+    // overriding the Rust startup defaults.
+    applyStoredWindowPrefs();
+    // Load saved chats from the encrypted on-disk store.
+    hydrateConversations();
     // Silent auto-check on launch; the banner only appears if something's newer.
     checkForUpdate();
     // eslint-disable-next-line react-hooks/exhaustive-deps

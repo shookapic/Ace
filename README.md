@@ -25,6 +25,7 @@ A minimal, stealth desktop chat overlay for **OpenAI** and **Anthropic (Claude)*
 - **Stealth mode** — hide the window from screenshots and screen shares (Windows/macOS).
 - **System tray** — hide to tray with a customizable global shortcut (default `Ctrl+Shift+A`).
 - **Adjustable window opacity** for an unobtrusive overlay.
+- **Auto-updates** — Ace checks GitHub Releases on launch and can download, verify (signed), and install new versions in-place (Settings → Updates, or the in-app banner).
 
 ## Platform support
 
@@ -67,6 +68,18 @@ npm run tauri build    # produce installers in src-tauri/target/release/bundle/
 ```
 
 Build on the OS you're targeting — Tauri cannot cross-compile macOS/Linux from Windows. Distributing a macOS build additionally requires Apple Developer signing + notarization.
+
+### Releasing updatable builds
+
+Auto-update artifacts are signed with a minisign keypair. To cut a release that existing installs can update to:
+
+```bash
+export TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.tauri/ace.key)"
+export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="<key password>"
+npm run tauri build
+```
+
+This emits the installers plus `*.sig` signatures. Publish a `latest.json` manifest (version, `pub_date`, and per-platform `signature` + download `url`) alongside the installer on the GitHub release; the app's updater endpoint reads `releases/latest/download/latest.json`. **Keep the private key secret — it is never committed.** Losing it means no existing install can auto-update.
 
 ## Tech stack
 

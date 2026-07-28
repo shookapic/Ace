@@ -2,11 +2,13 @@ import { useEffect, useState } from "react";
 import { AnimatePresence } from "framer-motion";
 import { TitlebarControls } from "./components/window/TitlebarControls";
 import { SettingsPanel } from "./components/settings/SettingsPanel";
+import { UpdateBanner } from "./components/UpdateBanner";
 import { StartupAnimation } from "./components/branding/StartupAnimation";
 import { Login } from "./routes/Login";
 import { Chat } from "./routes/Chat";
 import { useAuthStore } from "./state/authStore";
 import { useChatStore } from "./state/chatStore";
+import { useUpdateStore } from "./state/updateStore";
 import { useWindowStore } from "./state/windowStore";
 import { NEUTRAL_ACCENT, PROVIDER_ACCENT } from "./theme";
 
@@ -18,6 +20,7 @@ function App() {
   const activeProvider = useChatStore((s) => s.provider);
   const toggleShortcut = useWindowStore((s) => s.toggleShortcut);
   const applyToggleShortcut = useWindowStore((s) => s.applyToggleShortcut);
+  const checkForUpdate = useUpdateStore((s) => s.checkForUpdate);
   const accent = activeProvider ? PROVIDER_ACCENT[activeProvider] : NEUTRAL_ACCENT;
 
   useEffect(() => {
@@ -30,6 +33,8 @@ function App() {
     applyToggleShortcut(toggleShortcut).catch((err) =>
       console.error("failed to register toggle shortcut", err)
     );
+    // Silent auto-check on launch; the banner only appears if something's newer.
+    checkForUpdate();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -57,6 +62,7 @@ function App() {
             <Login key="login" />
           )}
         </AnimatePresence>
+        <UpdateBanner />
         <SettingsPanel />
       </div>
     </main>

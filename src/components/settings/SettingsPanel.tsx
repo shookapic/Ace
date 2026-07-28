@@ -4,6 +4,7 @@ import { CloseIcon } from "../ui/Icons";
 import { useAuthStore, type ProviderId } from "../../state/authStore";
 import { useChatStore } from "../../state/chatStore";
 import { useUiStore } from "../../state/uiStore";
+import { useUpdateStore } from "../../state/updateStore";
 import { shortcutLabel, useWindowStore, type ToggleShortcut } from "../../state/windowStore";
 
 const PROVIDER_LABEL: Record<ProviderId, string> = {
@@ -84,6 +85,45 @@ function ShortcutRecorder() {
         {capturing ? "Press a key combo… (Esc to cancel)" : shortcutLabel(toggleShortcut)}
       </button>
       {error ? <span className="text-[10px] text-red-400">{error}</span> : null}
+    </div>
+  );
+}
+
+function UpdateSection() {
+  const { status, version, error, checkForUpdate, installUpdate } = useUpdateStore();
+
+  return (
+    <div className="flex flex-col gap-1.5 border-t border-white/10 pt-3">
+      <SectionLabel>Updates</SectionLabel>
+      <div className="flex items-center gap-2">
+        {status === "available" ? (
+          <button
+            type="button"
+            onClick={() => installUpdate()}
+            className="rounded-lg bg-[var(--accent)] px-2.5 py-1.5 text-xs font-medium text-black transition hover:opacity-90"
+          >
+            Install {version} &amp; restart
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={() => checkForUpdate(true)}
+            disabled={status === "checking" || status === "downloading"}
+            className="rounded-lg border border-white/12 px-2.5 py-1.5 text-xs text-white/80 transition enabled:hover:border-white/25 disabled:opacity-50"
+          >
+            {status === "checking" ? "Checking…" : "Check for updates"}
+          </button>
+        )}
+        <span className="text-[10px] text-white/40">
+          {status === "uptodate"
+            ? "You're on the latest version."
+            : status === "downloading"
+              ? "Downloading…"
+              : status === "error" && error
+                ? "Check failed."
+                : ""}
+        </span>
+      </div>
     </div>
   );
 }
@@ -257,6 +297,8 @@ export function SettingsPanel() {
               <ShortcutRecorder />
 
               <LocalChatsManager />
+
+              <UpdateSection />
 
               {connected.length > 0 ? (
                 <div className="flex flex-col gap-2 border-t border-white/10 pt-3">

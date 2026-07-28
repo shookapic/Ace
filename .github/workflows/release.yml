@@ -1,8 +1,10 @@
 name: Release
 
-# Push a version tag (e.g. v0.1.6) to build, sign, and publish a release for
-# Windows, Linux, and macOS. Signed installers + a `latest.json` manifest are
-# attached automatically so existing installs can auto-update.
+# Push a version tag (e.g. v0.1.9) to build, sign, and publish a release for
+# Windows, Linux, and macOS. A draft release is created first so the matrix build
+# jobs upload into it (instead of racing to create the release themselves), then a
+# final job publishes it. Signed installers + a `latest.json` manifest are attached
+# so existing installs can auto-update.
 on:
   push:
     tags:
@@ -12,7 +14,30 @@ permissions:
   contents: write
 
 jobs:
-  release:
+  create-release:
+    runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.create.outputs.result }}
+    steps:
+      - name: Create draft release
+        id: create
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const tag = context.ref.replace('refs/tags/', '');
+            const { data } = await github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: tag,
+              name: `Ace ${tag}`,
+              body: 'Download the installer for your OS below. Existing installs update themselves automatically. macOS builds are unsigned — right-click the app and choose Open on first run (or run `xattr -cr /Applications/Ace.app`).',
+              draft: true,
+              prerelease: false,
+            });
+            return data.id;
+
+  build-tauri:
+    needs: create-release
     strategy:
       fail-fast: false
       matrix:
@@ -23,8 +48,7 @@ jobs:
           - platform: ubuntu-latest
             args: ""
             rust_target: ""
-          # One universal DMG (Intel + Apple Silicon) built on the arm64 runner,
-          # avoiding the scarce/slow macos-13 Intel runners.
+          # One universal DMG (Intel + Apple Silicon) built on the arm64 runner.
           - platform: macos-latest
             args: "--target universal-apple-darwin"
             rust_target: "aarch64-apple-darwin,x86_64-apple-darwin"
@@ -43,16 +67,12 @@ jobs:
         with:
           targets: ${{ matrix.rust_target }}
 
-      # Tauri's Linux build needs webkit2gtk + a few system libraries.
       - name: Install Linux dependencies
         if: matrix.platform == 'ubuntu-latest'
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev
 
-      # Warm cache lives on `main` (Windows only for now); other platforms build
-      # cold but in parallel. save-if:false so tag runs never write tag-scoped
-      # caches that nothing can reuse.
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
         with:
@@ -63,17 +83,31 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Build, sign, and publish release
+      - name: Build, sign, and upload
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: "Ace ${{ github.ref_name }}"
-          releaseBody: "Download the installer for your OS below. Existing installs update themselves automatically. macOS builds are unsigned — right-click the app and choose Open on first run (or run `xattr -cr /Applications/Ace.app`)."
-          releaseDraft: false
-          prerelease: false
+          releaseId: ${{ needs.create-release.outputs.release_id }}
           includeUpdaterJson: true
           args: ${{ matrix.args }}
+
+  publish-release:
+    needs: [create-release, build-tauri]
+    runs-on: ubuntu-latest
+    # Publish as long as the draft was created and the run wasn't cancelled, so a
+    # single platform failing still ships the ones that succeeded.
+    if: ${{ needs.create-release.result == 'success' && !cancelled() }}
+    steps:
+      - name: Publish release
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.repos.updateRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              release_id: ${{ needs.create-release.outputs.release_id }},
+              draft: false,
+            });

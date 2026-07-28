@@ -2,7 +2,25 @@ import { useRef, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { CheckIcon, CopyIcon } from "./Icons";
+
+// Open links in the user's real browser instead of navigating the app's own
+// webview — which holds privileged Tauri IPC. Only http(s)/mailto are honored.
+function SafeLink({ href, children }: { href?: string; children?: ReactNode }) {
+  return (
+    <a
+      href={href}
+      rel="noopener noreferrer"
+      onClick={(e) => {
+        e.preventDefault();
+        if (href && /^(https?:|mailto:)/i.test(href)) openUrl(href).catch(() => {});
+      }}
+    >
+      {children}
+    </a>
+  );
+}
 
 /** Small copy-to-clipboard button that flips to a check for a moment. */
 function CopyButton({ getText, className = "" }: { getText: () => string; className?: string }) {
@@ -50,6 +68,7 @@ export function MarkdownMessage({ content }: { content: string }) {
       remarkPlugins={[remarkGfm]}
       rehypePlugins={[[rehypeHighlight, { detect: true, ignoreMissing: true }]]}
       components={{
+        a: ({ href, children }) => <SafeLink href={href}>{children}</SafeLink>,
         pre: ({ children }) => <CodeBlock>{children}</CodeBlock>,
         code: ({ className, children, ...rest }) => {
           const isBlock = /\b(hljs|language-)/.test(className ?? "");

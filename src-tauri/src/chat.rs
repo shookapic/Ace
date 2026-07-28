@@ -137,7 +137,7 @@ pub async fn transcribe_audio(audio_base64: String, mime: String) -> Result<Stri
     if !response.status().is_success() {
         let status = response.status();
         let text = response.text().await.unwrap_or_default();
-        eprintln!("transcribe_audio raw error body ({status}): {text}");
+        eprintln!("transcribe_audio failed: HTTP {status}");
         return Err(friendly_http_error(status, &text));
     }
 
@@ -959,7 +959,7 @@ async fn stream_openai(
     if !response.status().is_success() {
         let status = response.status();
         let text = response.text().await.unwrap_or_default();
-        eprintln!("chat request raw error body ({status}): {text}");
+        eprintln!("chat request failed: HTTP {status}");
         return Err(friendly_http_error(status, &text));
     }
 
@@ -1081,7 +1081,7 @@ async fn stream_anthropic(
     if !response.status().is_success() {
         let status = response.status();
         let text = response.text().await.unwrap_or_default();
-        eprintln!("Anthropic chat request raw error body ({status}): {text}");
+        eprintln!("Anthropic chat request failed: HTTP {status}");
         return Err(friendly_http_error(status, &text));
     }
 

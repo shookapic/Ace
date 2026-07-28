@@ -1,0 +1,49 @@
+name: Warm Rust cache
+
+# GitHub Actions caches are ref-scoped: a run can only restore caches from its
+# own ref or the default branch. Release builds run on isolated tag refs, so they
+# could never reuse each other's caches. This job keeps a warm Rust cache on
+# `main` (the default branch) under the same shared-key the release uses, so every
+# tagged release restores it instead of compiling all dependencies from scratch.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src-tauri/**"
+      - "package-lock.json"
+      - ".github/workflows/warm-cache.yml"
+
+concurrency:
+  group: warm-cache
+  cancel-in-progress: true
+
+jobs:
+  warm:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          shared-key: ace-release
+
+      # tauri-build checks the frontend dist exists, so produce it first.
+      - name: Install dependencies
+        run: npm ci
+      - name: Build frontend
+        run: npm run build
+
+      - name: Compile release dependencies
+        working-directory: src-tauri
+        run: cargo build --release

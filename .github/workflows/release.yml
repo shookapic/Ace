@@ -26,10 +26,15 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
+      # Release runs on an isolated tag ref, so it can't see other tags' caches —
+      # only its own ref or the default branch. The warm-cache workflow keeps a
+      # cache on `main` under this same shared-key, which this job restores.
       - name: Cache Rust
-        uses: swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+          shared-key: ace-release
+          save-if: false
 
       - name: Install dependencies
         run: npm ci

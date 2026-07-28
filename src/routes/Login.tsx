@@ -1,7 +1,9 @@
 import { AnimatePresence, motion } from "framer-motion";
 import { useEffect, useState } from "react";
 import { AnthropicLogo, OpenAILogo } from "../components/branding/ProviderLogos";
+import { SettingsIcon } from "../components/ui/Icons";
 import { useAuthStore, type ProviderId } from "../state/authStore";
+import { useUiStore } from "../state/uiStore";
 
 const PROVIDERS = [
   { id: "anthropic", label: "Anthropic", Logo: AnthropicLogo },
@@ -13,6 +15,7 @@ export function Login() {
   const [message, setMessage] = useState("Connect a provider to start");
   const [error, setError] = useState<string | null>(null);
   const { justConnected, startLogin } = useAuthStore();
+  const toggleSettings = useUiStore((s) => s.toggleSettings);
 
   useEffect(() => {
     if (!justConnected) return;
@@ -46,11 +49,20 @@ export function Login() {
 
   return (
     <motion.div
-      className="flex h-full w-full flex-col items-center justify-center gap-4 overflow-y-auto px-6 py-8"
+      className="relative flex h-full w-full flex-col items-center justify-center gap-4 overflow-y-auto px-6 py-8"
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       transition={{ duration: 0.4 }}
     >
+      <button
+        type="button"
+        onClick={toggleSettings}
+        aria-label="Settings"
+        className="absolute right-2.5 top-2.5 flex h-8 w-8 items-center justify-center rounded-lg text-white/40 transition hover:bg-white/[0.06] hover:text-white/80"
+      >
+        <SettingsIcon className="h-[18px] w-[18px]" />
+      </button>
+
       <AnimatePresence mode="wait">
         {justConnected ? (
           <motion.p

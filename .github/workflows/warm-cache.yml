@@ -6,8 +6,8 @@ name: Warm Rust cache
 # `main` (the default branch), one per OS, under the same shared-key the release
 # uses, so tagged releases restore them instead of recompiling all dependencies.
 #
-# Windows + Linux only: macOS runner minutes cost 10x, so warming it on every
-# push would burn the Actions budget. macOS release builds stay cold (infrequent).
+# The repo is public, so Actions minutes are free/unlimited on every runner —
+# warming all three platforms (incl. the 10x-cost macOS) costs nothing.
 on:
   push:
     branches: [main]
@@ -21,7 +21,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        platform: [windows-latest, ubuntu-latest]
+        include:
+          - platform: windows-latest
+            rust_targets: ""
+            build: cargo build --release
+          - platform: ubuntu-latest
+            rust_targets: ""
+            build: cargo build --release
+          # Warm both arches so the universal release build reuses them.
+          - platform: macos-latest
+            rust_targets: "aarch64-apple-darwin,x86_64-apple-darwin"
+            build: cargo build --release --target aarch64-apple-darwin && cargo build --release --target x86_64-apple-darwin
     runs-on: ${{ matrix.platform }}
     concurrency:
       group: warm-cache-${{ matrix.platform }}
@@ -37,6 +47,8 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_targets }}
 
       - name: Install Linux dependencies
         if: matrix.platform == 'ubuntu-latest'
@@ -58,4 +70,4 @@ jobs:
 
       - name: Compile release dependencies
         working-directory: src-tauri
-        run: cargo build --release
+        run: ${{ matrix.build }}

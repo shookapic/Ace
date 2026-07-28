@@ -19,6 +19,7 @@ import {
   StopIcon,
 } from "../components/ui/Icons";
 import { CopyButton, MarkdownMessage } from "../components/ui/MarkdownMessage";
+import { TypingDots } from "../components/ui/TypingDots";
 import { useAuthStore, type ProviderId } from "../state/authStore";
 import { useChatStore, type ChatMessage, type ModelInfo } from "../state/chatStore";
 import { useUiStore } from "../state/uiStore";
@@ -92,7 +93,7 @@ function ColumnMessages({ items }: { items: ChatMessage[] }) {
             key={m.id}
             className="min-w-0 break-words text-[13px] text-white/90 [overflow-wrap:anywhere]"
           >
-            <MarkdownMessage content={m.content || "…"} />
+            {m.content ? <MarkdownMessage content={m.content} /> : <TypingDots />}
           </div>
         )
       )}
@@ -659,7 +660,11 @@ export function Chat() {
               ) : (
                 <div key={m.id} className="group/msg min-w-0 max-w-full self-start px-0.5 text-sm text-white/90">
                   <div className="max-w-none overflow-hidden break-words [overflow-wrap:anywhere]">
-                    <MarkdownMessage content={m.content || (sending ? "…" : "")} />
+                    {m.content ? (
+                      <MarkdownMessage content={m.content} />
+                    ) : sending ? (
+                      <TypingDots />
+                    ) : null}
                   </div>
                   {m.content ? (
                     <div className="mt-1 flex items-center gap-1 opacity-0 transition group-hover/msg:opacity-100">

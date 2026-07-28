@@ -2,9 +2,12 @@ name: Warm Rust cache
 
 # GitHub Actions caches are ref-scoped: a run can only restore caches from its
 # own ref or the default branch. Release builds run on isolated tag refs, so they
-# could never reuse each other's caches. This job keeps a warm Rust cache on
-# `main` (the default branch) under the same shared-key the release uses, so every
-# tagged release restores it instead of compiling all dependencies from scratch.
+# could never reuse each other's caches. This job keeps warm Rust caches on
+# `main` (the default branch), one per OS, under the same shared-key the release
+# uses, so tagged releases restore them instead of recompiling all dependencies.
+#
+# Windows + Linux only: macOS runner minutes cost 10x, so warming it on every
+# push would burn the Actions budget. macOS release builds stay cold (infrequent).
 on:
   push:
     branches: [main]
@@ -13,13 +16,16 @@ on:
       - "package-lock.json"
       - ".github/workflows/warm-cache.yml"
 
-concurrency:
-  group: warm-cache
-  cancel-in-progress: true
-
 jobs:
   warm:
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.platform }}
+    concurrency:
+      group: warm-cache-${{ matrix.platform }}
+      cancel-in-progress: true
     steps:
       - uses: actions/checkout@v4
 
@@ -31,6 +37,12 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux dependencies
+        if: matrix.platform == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev
 
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2

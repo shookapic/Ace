@@ -70,4 +70,4 @@ Ace talks directly to OpenAI and Anthropic with your own credentials, stored in 
 
 ## License
 
-MIT
+[PolyForm Noncommercial License 1.0.0](LICENSE) — free to use, modify, and share for any **noncommercial** purpose. Commercial use is not permitted.

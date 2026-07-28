@@ -9,10 +9,8 @@ A minimal, stealth desktop chat overlay for **OpenAI** and **Anthropic (Claude)*
 ## Demo
 
 <p align="center">
-  <img src="docs/demo.svg" width="640" alt="Ace demo" />
+  <img src="docs/demo_ace.gif" width="640" alt="Ace demo" />
 </p>
-
-> _Placeholder._ Drop a screen recording at **`docs/demo.gif`** and change the `src` above to `docs/demo.gif` to showcase the app in motion.
 
 ## Features
 

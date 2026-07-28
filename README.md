@@ -36,7 +36,7 @@ A minimal, stealth desktop chat overlay for **OpenAI** and **Anthropic (Claude)*
 ¹ Implemented but **untested** — the macOS-only code can't be compiled on Windows, so the first macOS build should verify it.
 ² No reliable cross-compositor API exists on Linux (Wayland forbids capture-exclusion; X11 has no standard). The app runs; these two controls are no-ops.
 
-Windows is the primary, fully-tested platform. There are no cross-compiled binaries — build on the target OS.
+Windows is the primary, fully-tested platform. Each release also ships Linux and macOS builds from CI (see [Releases](../../releases)); macOS is **unsigned** and the macOS window effects are implemented but not yet verified on real hardware.
 
 ## How history works
 
@@ -47,13 +47,13 @@ Anthropic's inference OAuth token can't read conversation history, and claude.ai
 
 OpenAI (ChatGPT) history uses your OAuth token directly and works on any setup.
 
-## Install (Windows)
+## Install
 
-Grab the latest installer from [Releases](../../releases):
+Grab the latest build for your OS from [Releases](../../releases):
 
-- **`Ace_x.y.z_x64-setup.exe`** (NSIS, smaller) or **`Ace_x.y.z_x64_en-US.msi`** (MSI).
-
-> The build is unsigned, so Windows SmartScreen will warn on first run — click **More info → Run anyway**.
+- **Windows** — `Ace_x.y.z_x64-setup.exe` (NSIS) or `Ace_x.y.z_x64_en-US.msi` (MSI). Unsigned, so SmartScreen warns on first run — click **More info → Run anyway**.
+- **Linux** — `Ace_x.y.z_amd64.AppImage` (`chmod +x` then run), or the `.deb` / `.rpm` package.
+- **macOS** — `Ace_x.y.z_aarch64.dmg` (Apple Silicon) or `Ace_x.y.z_x64.dmg` (Intel). **Unsigned** — right-click the app → **Open** on first launch, or run `xattr -cr /Applications/Ace.app`.
 
 ## Build from source
 

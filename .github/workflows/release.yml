@@ -1,8 +1,8 @@
 name: Release
 
-# Push a version tag (e.g. v0.1.3) to build, sign, and publish a release.
-# The signed installers + a `latest.json` manifest are attached automatically,
-# so existing installs can auto-update.
+# Push a version tag (e.g. v0.1.6) to build, sign, and publish a release for
+# Windows, Linux, and macOS. Signed installers + a `latest.json` manifest are
+# attached automatically so existing installs can auto-update.
 on:
   push:
     tags:
@@ -13,7 +13,23 @@ permissions:
 
 jobs:
   release:
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-latest
+            args: ""
+            rust_target: ""
+          - platform: ubuntu-latest
+            args: ""
+            rust_target: ""
+          - platform: macos-latest # Apple Silicon
+            args: "--target aarch64-apple-darwin"
+            rust_target: "aarch64-apple-darwin"
+          - platform: macos-13 # Intel
+            args: "--target x86_64-apple-darwin"
+            rust_target: "x86_64-apple-darwin"
+    runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
 
@@ -25,10 +41,19 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
 
-      # Release runs on an isolated tag ref, so it can't see other tags' caches —
-      # only its own ref or the default branch. The warm-cache workflow keeps a
-      # cache on `main` under this same shared-key, which this job restores.
+      # Tauri's Linux build needs webkit2gtk + a few system libraries.
+      - name: Install Linux dependencies
+        if: matrix.platform == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev
+
+      # Warm cache lives on `main` (Windows only for now); other platforms build
+      # cold but in parallel. save-if:false so tag runs never write tag-scoped
+      # caches that nothing can reuse.
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
         with:
@@ -48,7 +73,8 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "Ace ${{ github.ref_name }}"
-          releaseBody: "See the assets below to download and install. Existing installs update themselves automatically."
+          releaseBody: "Download the installer for your OS below. Existing installs update themselves automatically. macOS builds are unsigned — right-click the app and choose Open on first run (or run `xattr -cr /Applications/Ace.app`)."
           releaseDraft: false
           prerelease: false
           includeUpdaterJson: true
+          args: ${{ matrix.args }}

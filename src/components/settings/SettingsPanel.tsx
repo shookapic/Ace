@@ -245,6 +245,8 @@ export function SettingsPanel() {
   const setCaptureHidden = useWindowStore((s) => s.setCaptureHidden);
   const clickThrough = useWindowStore((s) => s.clickThrough);
   const setClickThrough = useWindowStore((s) => s.setClickThrough);
+  const remoteSyncEnabled = useChatStore((s) => s.remoteSyncEnabled);
+  const toggleRemoteSync = useChatStore((s) => s.toggleRemoteSync);
   const providers = useAuthStore((s) => s.providers);
   const signOut = useAuthStore((s) => s.signOut);
 
@@ -327,6 +329,26 @@ export function SettingsPanel() {
                   type="checkbox"
                   checked={clickThrough}
                   onChange={(e) => setClickThrough(e.target.checked)}
+                  className="h-4 w-4 accent-[color:var(--accent)]"
+                />
+              </label>
+
+              <label className="flex cursor-pointer items-center justify-between">
+                <div className="flex flex-col pr-2">
+                  <span className="text-xs font-medium text-white/90">
+                    Save chats to my account
+                  </span>
+                  <span className="text-[10px] text-white/40">
+                    Replies write back into your real claude.ai / chatgpt.com history via
+                    your account. Uses the provider's own model (not Ace's model pick);
+                    text only, no attachments. ChatGPT may occasionally block this with a
+                    CAPTCHA.
+                  </span>
+                </div>
+                <input
+                  type="checkbox"
+                  checked={remoteSyncEnabled}
+                  onChange={toggleRemoteSync}
                   className="h-4 w-4 accent-[color:var(--accent)]"
                 />
               </label>

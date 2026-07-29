@@ -1,4 +1,4 @@
-import { useRef, useState, type ReactNode } from "react";
+import { memo, useRef, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
@@ -61,7 +61,11 @@ function CodeBlock({ children }: { children?: ReactNode }) {
   );
 }
 
-export function MarkdownMessage({ content }: { content: string }) {
+// Memoized: react-markdown + rehype-highlight is expensive, and the parent chat
+// view re-renders on every keystroke / stream chunk. With a stable `content`
+// string this skips re-parsing every other message in the thread — the fix for
+// stutter on large conversations.
+export const MarkdownMessage = memo(function MarkdownMessage({ content }: { content: string }) {
   return (
     <div className="md-body">
     <ReactMarkdown
@@ -89,6 +93,6 @@ export function MarkdownMessage({ content }: { content: string }) {
     </ReactMarkdown>
     </div>
   );
-}
+});
 
 export { CopyButton };

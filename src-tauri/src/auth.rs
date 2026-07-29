@@ -251,6 +251,90 @@ async fn exchange_code(
     })
 }
 
+/// Exchanges a refresh token for a fresh access token. Mirrors `exchange_code`'s
+/// per-provider body format (JSON for Anthropic, form for OpenAI).
+async fn refresh_access_token(
+    cfg: &ProviderConfig,
+    refresh_token: &str,
+) -> Result<StoredToken, String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(120))
+        .build()
+        .map_err(|e| format!("failed to build http client: {e}"))?;
+
+    let response = if cfg.id == "anthropic" {
+        let body = serde_json::json!({
+            "grant_type": "refresh_token",
+            "client_id": cfg.client_id,
+            "refresh_token": refresh_token,
+        });
+        client
+            .post(cfg.token_url)
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("token refresh request failed: {e}"))?
+    } else {
+        let fields = [
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh_token),
+            ("client_id", cfg.client_id),
+        ];
+        client
+            .post(cfg.token_url)
+            .form(&fields)
+            .send()
+            .await
+            .map_err(|e| format!("token refresh request failed: {e}"))?
+    };
+
+    let status = response.status();
+    let text = response.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(format!("token refresh failed ({status}): {text}"));
+    }
+
+    let parsed: TokenResponse = serde_json::from_str(&text)
+        .map_err(|e| format!("failed to parse token response: {e}"))?;
+
+    Ok(StoredToken {
+        access_token: parsed.access_token,
+        // Providers may omit a rotated refresh token; keep the existing one then.
+        refresh_token: parsed.refresh_token.or_else(|| Some(refresh_token.to_string())),
+        expires_at: parsed.expires_in.map(|s| now_secs() + s),
+        id_token: parsed.id_token,
+    })
+}
+
+/// Loads the stored token, transparently refreshing it first when it has expired
+/// (or is within a 60s skew window) and a refresh token is available. On any
+/// refresh failure it falls back to the stored token so callers can still try.
+pub(crate) async fn load_valid_token(provider: &str) -> Option<StoredToken> {
+    let token = load_token(provider)?;
+
+    let still_valid = match token.expires_at {
+        Some(exp) => exp > now_secs() + 60,
+        None => true,
+    };
+    if still_valid {
+        return Some(token);
+    }
+
+    let refresh = token.refresh_token.clone()?;
+    let cfg = provider_config(provider).ok()?;
+    match refresh_access_token(cfg, &refresh).await {
+        Ok(new_token) => {
+            let _ = store_token(provider, &new_token);
+            Some(new_token)
+        }
+        Err(e) => {
+            eprintln!("token refresh for {provider} failed: {e}");
+            Some(token)
+        }
+    }
+}
+
 fn run_loopback_listener(port: u16, expected_state: String) -> Result<(String, String), String> {
     let server = tiny_http::Server::http(("127.0.0.1", port))
         .map_err(|e| {

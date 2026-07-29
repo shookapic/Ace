@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "chatgpt-webview",
+  "description": "Lets the ChatGPT verification webview relay its conversation stream back to Ace over IPC.",
+  "windows": ["chatgpt-login"],
+  "remote": {
+    "urls": ["https://chatgpt.com", "https://*.chatgpt.com", "https://*.oaistatic.com"]
+  },
+  "permissions": ["core:default"]
+}

@@ -41,9 +41,16 @@ impl Default for ShortcutBindings {
 /// Clear and re-register every bound shortcut. Duplicate/among-conflicting binds
 /// just get skipped with a log rather than aborting the whole set.
 fn reregister_shortcuts(app: &tauri::AppHandle, map: &HashMap<String, Shortcut>) {
-    let _ = app.global_shortcut().unregister_all();
+    let gs = app.global_shortcut();
+    let _ = gs.unregister_all();
     for (action, sc) in map {
-        if let Err(e) = app.global_shortcut().register(*sc) {
+        // On Windows the plugin's registry can lag `unregister_all`, so a combo
+        // still reads as registered and `register` errors with "already
+        // registered". Clear this specific combo first to keep it idempotent.
+        if gs.is_registered(*sc) {
+            let _ = gs.unregister(*sc);
+        }
+        if let Err(e) = gs.register(*sc) {
             eprintln!("could not register shortcut for {action}: {e}");
         }
     }
@@ -186,12 +193,16 @@ pub fn run() {
         .manage(ShortcutBindings::default())
         .manage(ClickThroughState::default())
         .manage(chat::ClaudeWebSession::default())
+        .manage(chat::ChatGptWebSession::default())
+        .manage(chat::OpenAiRelay::default())
         .manage(chat::ChatCancels::default())
         .invoke_handler(tauri::generate_handler![
             auth::start_oauth_login,
             auth::get_auth_status,
             auth::sign_out,
             chat::send_chat_message,
+            chat::send_claude_web_message,
+            chat::send_openai_web_message,
             chat::cancel_chat_message,
             chat::list_models,
             chat::pick_files,
@@ -199,6 +210,8 @@ pub fn run() {
             chat::list_conversations,
             chat::get_conversation,
             chat::open_claude_login,
+            chat::open_chatgpt_login,
+            chat::openai_webview_send,
             window::effects::set_window_opacity,
             window::effects::set_capture_hidden,
             set_action_shortcut,

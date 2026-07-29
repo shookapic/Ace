@@ -14,6 +14,10 @@ export interface ChatMessage {
   role: "user" | "assistant";
   content: string;
   attachments?: Attachment[];
+  // Epoch ms when the message was created. Optional: conversations saved before
+  // timestamps existed (and remote history, which carries no per-turn time) omit
+  // it, and the UI simply shows no time for those.
+  createdAt?: number;
 }
 
 interface ChunkEvent {
@@ -71,6 +75,19 @@ function saveLocalConversations(list: LocalConversation[]) {
   );
 }
 
+// Whether Anthropic turns write back into the user's real claude.ai account (via
+// claude.ai's own /completion endpoint) instead of the stateless inference API.
+// On by default; persisted so an explicit opt-out survives restarts.
+const REMOTE_SYNC_KEY = "ace.remoteSync.anthropic";
+function loadRemoteSync(): boolean {
+  try {
+    const stored = localStorage.getItem(REMOTE_SYNC_KEY);
+    return stored === null ? true : stored === "1";
+  } catch {
+    return true;
+  }
+}
+
 function deriveTitle(messages: ChatMessage[]): string {
   const firstUser = messages.find((m) => m.role === "user");
   const text = firstUser?.content.trim() ?? "";
@@ -99,6 +116,15 @@ interface ChatState {
   activeRequestId: string | null;
   compareMode: boolean;
   compareThreads: Record<ProviderId, ChatMessage[]>;
+  // EXPERIMENTAL claude.ai write-back.
+  remoteSyncEnabled: boolean;
+  // The real claude.ai conversation uuid the current thread saves back into
+  // (null = not tied to a server conversation; a new one is created on send).
+  remoteConversationId: string | null;
+  // A send hit ChatGPT's CAPTCHA and is waiting to auto-resend once the user
+  // finishes verification.
+  pendingResend: boolean;
+  toggleRemoteSync: () => void;
   setProvider: (provider: ProviderId) => void;
   setModel: (provider: ProviderId, modelId: string) => void;
   fetchModels: (provider: ProviderId) => Promise<void>;
@@ -119,6 +145,7 @@ interface ChatState {
   clearLocalConversations: () => void;
   newConversation: () => void;
   connectClaudeWeb: () => Promise<void>;
+  connectChatgptWeb: () => Promise<void>;
 }
 
 // Maps an in-flight requestId to the assistant message it should append streamed
@@ -146,9 +173,21 @@ async function runCompletion(baseMessages: ChatMessage[]) {
   const conversationId = state.activeConversationId ?? crypto.randomUUID();
   const model = state.selectedModel[provider] ?? undefined;
 
+  // Route the turn through the provider's own web endpoint (claude.ai /
+  // chatgpt.com) so it's saved into the user's real account. Decided from state
+  // so every entry point (send, regenerate, auto-resend) routes consistently.
+  // Only text-only turns qualify — the web paths don't take attachments yet.
+  const last = baseMessages[baseMessages.length - 1];
+  const hasAttachments = !!(last?.attachments && last.attachments.length > 0);
+  const viaWeb =
+    state.remoteSyncEnabled &&
+    (provider === "anthropic" || provider === "openai") &&
+    !hasAttachments;
+  const prompt = last?.content ?? "";
+
   pendingRequests.set(requestId, { assistantId, thread: "main" });
   useChatStore.setState({
-    messages: [...baseMessages, { id: assistantId, role: "assistant", content: "" }],
+    messages: [...baseMessages, { id: assistantId, role: "assistant", content: "", createdAt: Date.now() }],
     sending: true,
     error: null,
     pendingAttachments: [],
@@ -157,15 +196,39 @@ async function runCompletion(baseMessages: ChatMessage[]) {
   });
 
   try {
-    await invoke("send_chat_message", {
-      provider,
-      requestId,
-      model,
-      messages: toHistory(baseMessages),
-    });
+    if (viaWeb) {
+      if (provider === "anthropic") {
+        await invoke("send_claude_web_message", {
+          requestId,
+          conversationId: state.remoteConversationId,
+          prompt,
+        });
+      } else {
+        // ChatGPT: drive OpenAI's own page so its code mints the sentinel tokens.
+        // It continues whatever conversation the webview currently has open.
+        await invoke("openai_webview_send", { requestId, prompt });
+      }
+    } else {
+      await invoke("send_chat_message", {
+        provider,
+        requestId,
+        model,
+        messages: toHistory(baseMessages),
+      });
+    }
   } catch (err) {
+    const message = String(err);
     pendingRequests.delete(requestId);
-    useChatStore.setState({ sending: false, error: String(err), activeRequestId: null });
+    // Drop the empty placeholder bubble the send just added.
+    useChatStore.setState((s) => ({
+      sending: false,
+      error: message,
+      activeRequestId: null,
+      messages: s.messages.filter((m) => m.id !== assistantId),
+      // A CAPTCHA block means "verify then retry"; remember so we can auto-resend
+      // once ChatGPT verification completes instead of making the user re-type.
+      pendingResend: message.includes("CAPTCHA"),
+    }));
   }
 }
 
@@ -182,7 +245,7 @@ async function sendCompare(userMessage: ChatMessage) {
     const assistantId = crypto.randomUUID();
     const requestId = crypto.randomUUID();
     const base = [...state.compareThreads[provider], userMessage];
-    newThreads[provider] = [...base, { id: assistantId, role: "assistant", content: "" }];
+    newThreads[provider] = [...base, { id: assistantId, role: "assistant", content: "", createdAt: Date.now() }];
     pendingRequests.set(requestId, { assistantId, thread: provider });
     requests.push({ provider, requestId, history: toHistory(base) });
   }
@@ -231,6 +294,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
   activeRequestId: null,
   compareMode: false,
   compareThreads: { anthropic: [], openai: [] },
+  remoteSyncEnabled: loadRemoteSync(),
+  remoteConversationId: null,
+  pendingResend: false,
   lastConversationByProvider: { anthropic: null, openai: null },
   // Switching providers parks the current chat and restores the one you last had
   // open for the provider you're switching to — so bouncing between Claude and
@@ -247,6 +313,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
         lastConversationByProvider: remembered,
         messages: conv ? conv.messages.map((m) => ({ ...m })) : [],
         activeConversationId: conv ? conv.id : null,
+        // Local restores aren't tied to a server conversation.
+        remoteConversationId: null,
         activeTitle: conv ? conv.title : null,
         error: null,
         pendingAttachments: [],
@@ -283,6 +351,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       role: "user",
       content: trimmed,
       attachments: attachments.length > 0 ? attachments : undefined,
+      createdAt: Date.now(),
     };
 
     if (state.compareMode) {
@@ -292,6 +361,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (!state.provider) return;
     await runCompletion([...state.messages, userMessage]);
   },
+  toggleRemoteSync: () =>
+    set((s) => {
+      const next = !s.remoteSyncEnabled;
+      try {
+        localStorage.setItem(REMOTE_SYNC_KEY, next ? "1" : "0");
+      } catch {
+        /* ignore */
+      }
+      return { remoteSyncEnabled: next };
+    }),
   toggleCompareMode: () => {
     const s = get();
     if (s.sending) return;
@@ -369,11 +448,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
         "get_conversation",
         { provider, conversationId }
       );
+      // When write-back is on, remember the real account conversation id so
+      // replies append to the same server-side thread (claude.ai / chatgpt.com).
+      const remoteConversationId = get().remoteSyncEnabled ? conversationId : null;
       set({
         messages: history.map((m) => ({ id: crypto.randomUUID(), role: m.role, content: m.content })),
         activeTitle: title ?? null,
         // Give it a local id so replying continues it and saves it on this device.
         activeConversationId: crypto.randomUUID(),
+        remoteConversationId,
         error: null,
       });
     } catch (err) {
@@ -409,6 +492,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       provider: conv.provider,
       messages: conv.messages.map((m) => ({ ...m })),
       activeConversationId: conv.id,
+      remoteConversationId: null,
       activeTitle: conv.title,
       error: null,
       pendingAttachments: [],
@@ -445,6 +529,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       messages: [],
       activeTitle: null,
       activeConversationId: null,
+      remoteConversationId: null,
       error: null,
       pendingAttachments: [],
       compareThreads: { anthropic: [], openai: [] },
@@ -454,6 +539,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
       await invoke("open_claude_login");
     } catch (err) {
       set({ conversationsError: String(err) });
+    }
+  },
+  connectChatgptWeb: async () => {
+    try {
+      await invoke("open_chatgpt_login");
+    } catch (err) {
+      set({ error: String(err) });
     }
   },
 }));
@@ -467,6 +559,25 @@ listen("shortcut://screenshot", () => {
 listen("claude-session://ready", () => {
   const { provider, fetchConversations } = useChatStore.getState();
   if (provider === "anthropic") fetchConversations("anthropic");
+});
+
+// ChatGPT verification done — auto-resend the turn that hit the CAPTCHA so the
+// user doesn't have to re-type it. Small delay lets the page settle first.
+listen("chatgpt-session://ready", () => {
+  const s = useChatStore.getState();
+  if (s.pendingResend) {
+    useChatStore.setState({ pendingResend: false, error: null });
+    setTimeout(() => useChatStore.getState().regenerateLast(), 400);
+  } else if (s.error && s.error.includes("CAPTCHA")) {
+    useChatStore.setState({ error: null });
+  }
+});
+
+// EXPERIMENTAL: claude.ai write-back resolved which server conversation this turn
+// saved into — remember it so follow-up turns append to the same account thread.
+listen<{ requestId: string; conversationId: string }>("chat://web-saved", (event) => {
+  if (!pendingRequests.has(event.payload.requestId)) return;
+  useChatStore.setState({ remoteConversationId: event.payload.conversationId });
 });
 
 listen<ChunkEvent>("chat://chunk", (event) => {

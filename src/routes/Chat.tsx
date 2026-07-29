@@ -8,9 +8,11 @@ import {
   ChevronDownIcon,
   CloseIcon,
   CompareIcon,
+  CopyIcon,
   HistoryIcon,
   MicIcon,
   PaperclipIcon,
+  PencilIcon,
   PlusIcon,
   RegenerateIcon,
   SendIcon,
@@ -18,7 +20,7 @@ import {
   SpinnerIcon,
   StopIcon,
 } from "../components/ui/Icons";
-import { CopyButton, MarkdownMessage } from "../components/ui/MarkdownMessage";
+import { MarkdownMessage } from "../components/ui/MarkdownMessage";
 import { TypingDots } from "../components/ui/TypingDots";
 import { useAuthStore, type ProviderId } from "../state/authStore";
 import { useChatStore, type ChatMessage, type ModelInfo } from "../state/chatStore";
@@ -70,6 +72,56 @@ function IconButton({
     >
       {children}
     </button>
+  );
+}
+
+/** Short local clock time (e.g. "10:16 AM") for a message's action row. */
+function formatTime(ms?: number): string | null {
+  if (!ms) return null;
+  return new Date(ms).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+}
+
+/** Borderless icon button for the hover action row under a message. */
+function RowAction({
+  onClick,
+  label,
+  children,
+}: {
+  onClick: () => void;
+  label: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-label={label}
+      title={label}
+      className="flex items-center justify-center rounded-md p-1 text-white/35 transition hover:bg-white/10 hover:text-white/90"
+    >
+      {children}
+    </button>
+  );
+}
+
+/** Copy action for the row: flips to a check for a beat after copying. */
+function RowCopy({ getText }: { getText: () => string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <RowAction
+      label={copied ? "Copied" : "Copy"}
+      onClick={async () => {
+        try {
+          await navigator.clipboard.writeText(getText());
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1400);
+        } catch {
+          /* clipboard blocked — ignore */
+        }
+      }}
+    >
+      {copied ? <CheckIcon className="h-3.5 w-3.5" /> : <CopyIcon className="h-3.5 w-3.5" />}
+    </RowAction>
   );
 }
 
@@ -207,10 +259,14 @@ export function Chat() {
     deleteLocalConversation,
     newConversation,
     connectClaudeWeb,
+    connectChatgptWeb,
     compareMode,
     compareThreads,
     toggleCompareMode,
+    remoteSyncEnabled,
   } = useChatStore();
+  const savingToAccount = remoteSyncEnabled && !!provider && !compareMode;
+  const savingTarget = provider === "openai" ? "chatgpt.com" : "claude.ai";
   const [input, setInput] = useState("");
   const [historyQuery, setHistoryQuery] = useState("");
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -358,9 +414,20 @@ export function Chat() {
           })}
         </div>
 
-        <span className="min-w-0 flex-1 truncate text-center text-[11px] text-white/40">
-          {compareMode ? "" : activeTitle ?? ""}
-        </span>
+        <div className="flex min-w-0 flex-1 flex-col items-center overflow-hidden px-1">
+          <span className="w-full truncate text-center text-[11px] text-white/40">
+            {compareMode ? "" : activeTitle ?? ""}
+          </span>
+          {savingToAccount ? (
+            <span
+              title={`Replies are saved into your ${savingTarget} account`}
+              className="flex max-w-full items-center gap-1 overflow-hidden whitespace-nowrap text-[9px] font-medium text-emerald-300/80"
+            >
+              <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-400" />
+              <span className="truncate">saving to {savingTarget}</span>
+            </span>
+          ) : null}
+        </div>
 
         <div className="flex shrink-0 items-center gap-0.5">
           {connected.length === 2 ? (
@@ -578,82 +645,91 @@ export function Chat() {
               m.role === "user" ? (
                 <div
                   key={m.id}
-                  className="group/msg max-w-[85%] min-w-0 self-end overflow-hidden rounded-2xl rounded-br-md bg-[var(--accent-soft)] px-3.5 py-2 text-sm text-white"
+                  className="group/msg flex max-w-[85%] min-w-0 flex-col items-end self-end"
                 >
-                  {m.attachments && m.attachments.length > 0 ? (
-                    <div className="mb-1.5 flex flex-wrap gap-1.5">
-                      {m.attachments.map((att, i) =>
-                        att.mime.startsWith("image/") && att.dataBase64 ? (
-                          <img
-                            key={`${att.name}-${i}`}
-                            src={`data:${att.mime};base64,${att.dataBase64}`}
-                            alt={att.name}
-                            title={att.name}
-                            className="h-16 w-16 rounded-lg border border-white/15 object-cover"
-                          />
-                        ) : (
-                          <span
-                            key={`${att.name}-${i}`}
-                            className="flex items-center gap-1.5 rounded-lg bg-black/20 px-2 py-1 text-[11px] text-white/80"
-                          >
-                            <PaperclipIcon className="h-3 w-3 shrink-0" />
-                            <span className="truncate max-w-[140px]">{att.name}</span>
-                          </span>
-                        )
-                      )}
-                    </div>
-                  ) : null}
-                  {editingId === m.id ? (
-                    <div className="flex flex-col gap-1.5">
-                      <textarea
-                        value={editText}
-                        onChange={(e) => setEditText(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter" && !e.shiftKey) {
-                            e.preventDefault();
-                            submitEdit(m.id);
-                          } else if (e.key === "Escape") {
-                            setEditingId(null);
-                          }
-                        }}
-                        rows={2}
-                        autoFocus
-                        className="w-full resize-none rounded-lg bg-black/25 px-2 py-1.5 text-sm text-white focus:outline-none"
-                      />
-                      <div className="flex justify-end gap-1.5">
-                        <button
-                          type="button"
-                          onClick={() => setEditingId(null)}
-                          className="rounded-md px-2 py-1 text-[11px] text-white/60 hover:text-white"
-                        >
-                          Cancel
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => submitEdit(m.id)}
-                          className="rounded-md bg-black/30 px-2 py-1 text-[11px] font-medium text-white hover:bg-black/45"
-                        >
-                          Send
-                        </button>
+                  <div className="min-w-0 max-w-full overflow-hidden rounded-2xl rounded-br-md bg-[var(--accent-soft)] px-3 py-1.5 text-sm text-white">
+                    {m.attachments && m.attachments.length > 0 ? (
+                      <div className="mb-1.5 flex flex-wrap gap-1.5">
+                        {m.attachments.map((att, i) =>
+                          att.mime.startsWith("image/") && att.dataBase64 ? (
+                            <img
+                              key={`${att.name}-${i}`}
+                              src={`data:${att.mime};base64,${att.dataBase64}`}
+                              alt={att.name}
+                              title={att.name}
+                              className="h-16 w-16 rounded-lg border border-white/15 object-cover"
+                            />
+                          ) : (
+                            <span
+                              key={`${att.name}-${i}`}
+                              className="flex items-center gap-1.5 rounded-lg bg-black/20 px-2 py-1 text-[11px] text-white/80"
+                            >
+                              <PaperclipIcon className="h-3 w-3 shrink-0" />
+                              <span className="truncate max-w-[140px]">{att.name}</span>
+                            </span>
+                          )
+                        )}
                       </div>
-                    </div>
-                  ) : m.content ? (
-                    <div className="max-w-none overflow-hidden break-words [overflow-wrap:anywhere]">
-                      <MarkdownMessage content={m.content} />
-                    </div>
-                  ) : null}
-                  {editingId !== m.id && m.content && !sending ? (
-                    <div className="mt-1 flex justify-end opacity-0 transition group-hover/msg:opacity-100">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setEditingId(m.id);
-                          setEditText(m.content);
-                        }}
-                        className="rounded-md border border-white/15 bg-black/20 px-1.5 py-1 text-[11px] text-white/70 hover:text-white"
-                      >
-                        Edit
-                      </button>
+                    ) : null}
+                    {editingId === m.id ? (
+                      <div className="flex flex-col gap-1.5">
+                        <textarea
+                          value={editText}
+                          onChange={(e) => setEditText(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" && !e.shiftKey) {
+                              e.preventDefault();
+                              submitEdit(m.id);
+                            } else if (e.key === "Escape") {
+                              setEditingId(null);
+                            }
+                          }}
+                          rows={2}
+                          autoFocus
+                          className="w-full resize-none rounded-lg bg-black/25 px-2 py-1.5 text-sm text-white focus:outline-none"
+                        />
+                        <div className="flex justify-end gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => setEditingId(null)}
+                            className="rounded-md px-2 py-1 text-[11px] text-white/60 hover:text-white"
+                          >
+                            Cancel
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => submitEdit(m.id)}
+                            className="rounded-md bg-black/30 px-2 py-1 text-[11px] font-medium text-white hover:bg-black/45"
+                          >
+                            Send
+                          </button>
+                        </div>
+                      </div>
+                    ) : m.content ? (
+                      <div className="max-w-none overflow-hidden break-words [overflow-wrap:anywhere]">
+                        <MarkdownMessage content={m.content} />
+                      </div>
+                    ) : null}
+                  </div>
+                  {editingId !== m.id && m.content ? (
+                    <div className="mt-0.5 flex items-center gap-0.5 pr-0.5 opacity-0 transition group-hover/msg:opacity-100">
+                      {m.createdAt ? (
+                        <span className="mr-0.5 text-[10px] tabular-nums text-white/30">
+                          {formatTime(m.createdAt)}
+                        </span>
+                      ) : null}
+                      <RowCopy getText={() => m.content} />
+                      {!sending ? (
+                        <RowAction
+                          label="Edit"
+                          onClick={() => {
+                            setEditingId(m.id);
+                            setEditText(m.content);
+                          }}
+                        >
+                          <PencilIcon className="h-3.5 w-3.5" />
+                        </RowAction>
+                      ) : null}
                     </div>
                   ) : null}
                 </div>
@@ -667,17 +743,17 @@ export function Chat() {
                     ) : null}
                   </div>
                   {m.content ? (
-                    <div className="mt-1 flex items-center gap-1 opacity-0 transition group-hover/msg:opacity-100">
-                      <CopyButton getText={() => m.content} />
+                    <div className="mt-0.5 flex items-center gap-0.5 opacity-0 transition group-hover/msg:opacity-100">
+                      {m.createdAt ? (
+                        <span className="mr-0.5 text-[10px] tabular-nums text-white/30">
+                          {formatTime(m.createdAt)}
+                        </span>
+                      ) : null}
+                      <RowCopy getText={() => m.content} />
                       {i === messages.length - 1 && !sending ? (
-                        <button
-                          type="button"
-                          onClick={() => regenerateLast()}
-                          aria-label="Regenerate response"
-                          className="flex items-center gap-1 rounded-md border border-white/10 bg-white/5 px-1.5 py-1 text-[11px] text-white/60 transition hover:bg-white/10 hover:text-white/90"
-                        >
+                        <RowAction label="Regenerate response" onClick={() => regenerateLast()}>
                           <RegenerateIcon className="h-3.5 w-3.5" />
-                        </button>
+                        </RowAction>
                       ) : null}
                     </div>
                   ) : null}
@@ -694,7 +770,18 @@ export function Chat() {
         {error ? (
           <div className="mb-2 flex items-start gap-2 rounded-lg border border-amber-400/20 bg-amber-400/10 px-2.5 py-1.5">
             <span className="mt-px text-xs text-amber-300">⚠</span>
-            <p className="text-xs leading-relaxed text-amber-100/90">{error}</p>
+            <div className="flex flex-col gap-1.5">
+              <p className="text-xs leading-relaxed text-amber-100/90">{error}</p>
+              {error.includes("CAPTCHA") ? (
+                <button
+                  type="button"
+                  onClick={() => connectChatgptWeb()}
+                  className="self-start rounded-md border border-amber-400/30 bg-amber-400/15 px-2 py-1 text-[11px] font-medium text-amber-100 transition hover:bg-amber-400/25"
+                >
+                  Verify ChatGPT
+                </button>
+              ) : null}
+            </div>
           </div>
         ) : null}
 

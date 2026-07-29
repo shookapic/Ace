@@ -9,6 +9,26 @@ export interface Attachment {
   dataBase64: string;
 }
 
+export interface Usage {
+  inputTokens: number;
+  outputTokens: number;
+  model: string;
+}
+
+/** A file claude.ai created server-side, reconstructed from the stream. */
+export interface FileArtifact {
+  name: string;
+  language: string;
+  content: string;
+}
+
+/** Info the claude.ai web stream exposes instead of tokens: model + plan usage. */
+export interface WebInfo {
+  model: string;
+  usage5h: number;
+  usage7d: number;
+}
+
 export interface ChatMessage {
   id: string;
   role: "user" | "assistant";
@@ -18,6 +38,15 @@ export interface ChatMessage {
   // timestamps existed (and remote history, which carries no per-turn time) omit
   // it, and the UI simply shows no time for those.
   createdAt?: number;
+  // Token usage reported by the inference API (absent on account write-back
+  // replies, which don't expose usage).
+  usage?: Usage;
+  // Files claude.ai built server-side (write-back path), and the current
+  // tool-step label shown while it works.
+  files?: FileArtifact[];
+  toolStatus?: string | null;
+  // Model + plan usage from the claude.ai web path (which has no token counts).
+  webInfo?: WebInfo;
 }
 
 interface ChunkEvent {
@@ -32,6 +61,30 @@ interface DoneEvent {
 interface ChatErrorEvent {
   requestId: string;
   error: string;
+}
+
+interface UsageEvent {
+  requestId: string;
+  inputTokens: number;
+  outputTokens: number;
+  model: string;
+}
+
+interface ToolEvent {
+  requestId: string;
+  label: string;
+}
+
+interface FilesEvent {
+  requestId: string;
+  files: FileArtifact[];
+}
+
+interface WebInfoEvent {
+  requestId: string;
+  model: string;
+  usage5h: number;
+  usage7d: number;
 }
 
 export interface ModelInfo {
@@ -158,6 +211,20 @@ const pendingRequests = new Map<string, { assistantId: string; thread: PendingTa
 
 function toHistory(msgs: ChatMessage[]) {
   return msgs.map((m) => ({ role: m.role, content: m.content, attachments: m.attachments }));
+}
+
+// Apply an update to the assistant message a request is streaming into, whether
+// that's the main thread or a compare-mode column.
+function updateStreamingMessage(
+  entry: { assistantId: string; thread: PendingTarget },
+  updater: (m: ChatMessage) => ChatMessage
+) {
+  useChatStore.setState((s) => {
+    const apply = (msgs: ChatMessage[]) => msgs.map((m) => (m.id === entry.assistantId ? updater(m) : m));
+    if (entry.thread === "main") return { messages: apply(s.messages) };
+    const provider = entry.thread;
+    return { compareThreads: { ...s.compareThreads, [provider]: apply(s.compareThreads[provider]) } };
+  });
 }
 
 // Shared send path for the main chat: takes the full thread (already ending at
@@ -593,6 +660,41 @@ listen<ChunkEvent>("chat://chunk", (event) => {
   });
 });
 
+// Token usage for a reply — attach it to the assistant message so the UI can
+// show a per-message info bubble.
+listen<UsageEvent>("chat://usage", (event) => {
+  const { requestId, inputTokens, outputTokens, model } = event.payload;
+  const entry = pendingRequests.get(requestId);
+  if (!entry) return;
+  const usage: Usage = { inputTokens, outputTokens, model };
+  useChatStore.setState((s) => {
+    const apply = (msgs: ChatMessage[]) =>
+      msgs.map((m) => (m.id === entry.assistantId ? { ...m, usage } : m));
+    if (entry.thread === "main") return { messages: apply(s.messages) };
+    const provider = entry.thread;
+    return { compareThreads: { ...s.compareThreads, [provider]: apply(s.compareThreads[provider]) } };
+  });
+});
+
+// claude.ai ran a server-side tool — show its label so gaps aren't silent.
+listen<ToolEvent>("chat://tool", (event) => {
+  const entry = pendingRequests.get(event.payload.requestId);
+  if (entry) updateStreamingMessage(entry, (m) => ({ ...m, toolStatus: event.payload.label }));
+});
+
+// claude.ai presented files it built — attach them to the reply.
+listen<FilesEvent>("chat://files", (event) => {
+  const entry = pendingRequests.get(event.payload.requestId);
+  if (entry) updateStreamingMessage(entry, (m) => ({ ...m, files: event.payload.files, toolStatus: null }));
+});
+
+// claude.ai web replies carry model + plan usage instead of token counts.
+listen<WebInfoEvent>("chat://webinfo", (event) => {
+  const { requestId, model, usage5h, usage7d } = event.payload;
+  const entry = pendingRequests.get(requestId);
+  if (entry) updateStreamingMessage(entry, (m) => ({ ...m, webInfo: { model, usage5h, usage7d } }));
+});
+
 // Upsert the live conversation into on-device history so it survives restarts.
 function persistActiveConversation() {
   const { provider, messages, activeConversationId, activeTitle, localConversations } =
@@ -621,6 +723,7 @@ function persistActiveConversation() {
 listen<DoneEvent>("chat://done", (event) => {
   const entry = pendingRequests.get(event.payload.requestId);
   pendingRequests.delete(event.payload.requestId);
+  if (entry) updateStreamingMessage(entry, (m) => (m.toolStatus ? { ...m, toolStatus: null } : m));
   if (entry?.thread === "main") persistActiveConversation();
   if (pendingRequests.size === 0) {
     useChatStore.setState({ sending: false, activeRequestId: null });

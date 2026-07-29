@@ -130,6 +130,46 @@ export const CopyIcon = ({ className }: IconProps) =>
     className
   );
 
+export const FileIcon = ({ className }: IconProps) =>
+  base(
+    <>
+      <path d="M13 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9z" />
+      <path d="M13 3v6h6" />
+    </>,
+    className
+  );
+
+export const ExpandIcon = ({ className }: IconProps) =>
+  base(
+    <>
+      <path d="M15 3h6v6" />
+      <path d="M9 21H3v-6" />
+      <path d="M21 3l-8 8" />
+      <path d="M3 21l8-8" />
+    </>,
+    className
+  );
+
+export const DownloadIcon = ({ className }: IconProps) =>
+  base(
+    <>
+      <path d="M12 3v12" />
+      <path d="M7 11l5 5 5-5" />
+      <path d="M5 21h14" />
+    </>,
+    className
+  );
+
+export const InfoIcon = ({ className }: IconProps) =>
+  base(
+    <>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M9.7 9.2a2.4 2.4 0 1 1 3.4 2.2c-.8.4-1.1.9-1.1 1.8" />
+      <path d="M12 16.5h.01" />
+    </>,
+    className
+  );
+
 export const PencilIcon = ({ className }: IconProps) =>
   base(
     <>

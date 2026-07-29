@@ -195,6 +195,7 @@ pub fn run() {
         .manage(chat::ClaudeWebSession::default())
         .manage(chat::ChatGptWebSession::default())
         .manage(chat::OpenAiRelay::default())
+        .manage(chat::PreviewFile::default())
         .manage(chat::ChatCancels::default())
         .invoke_handler(tauri::generate_handler![
             auth::start_oauth_login,
@@ -206,6 +207,10 @@ pub fn run() {
             chat::cancel_chat_message,
             chat::list_models,
             chat::pick_files,
+            chat::save_file,
+            chat::open_html_in_browser,
+            chat::open_file_preview,
+            chat::get_preview_file,
             chat::transcribe_audio,
             chat::list_conversations,
             chat::get_conversation,

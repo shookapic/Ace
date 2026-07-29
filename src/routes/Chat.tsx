@@ -9,7 +9,9 @@ import {
   CloseIcon,
   CompareIcon,
   CopyIcon,
+  FileIcon,
   HistoryIcon,
+  InfoIcon,
   MicIcon,
   PaperclipIcon,
   PencilIcon,
@@ -23,7 +25,14 @@ import {
 import { MarkdownMessage } from "../components/ui/MarkdownMessage";
 import { TypingDots } from "../components/ui/TypingDots";
 import { useAuthStore, type ProviderId } from "../state/authStore";
-import { useChatStore, type ChatMessage, type ModelInfo } from "../state/chatStore";
+import {
+  useChatStore,
+  type ChatMessage,
+  type FileArtifact,
+  type ModelInfo,
+  type Usage,
+  type WebInfo,
+} from "../state/chatStore";
 import { useUiStore } from "../state/uiStore";
 import { PROVIDER_ACCENT } from "../theme";
 
@@ -122,6 +131,155 @@ function RowCopy({ getText }: { getText: () => string }) {
     >
       {copied ? <CheckIcon className="h-3.5 w-3.5" /> : <CopyIcon className="h-3.5 w-3.5" />}
     </RowAction>
+  );
+}
+
+function fmtTokens(n: number): string {
+  if (n >= 10000) return `${Math.round(n / 1000)}k`;
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
+  return String(n);
+}
+
+/** Approximate context window (tokens) for a model, for the context-fill bar. */
+function contextWindow(model: string): number | null {
+  const m = model.toLowerCase();
+  if (m.includes("claude")) return 200000;
+  if (m.includes("gpt-5") || m.includes("gpt-4.1")) return 400000;
+  if (m.includes("gpt-4o") || m.includes("gpt-4") || m.includes("o1") || m.includes("o3")) return 128000;
+  return null;
+}
+
+function Meter({ label, value, pct }: { label: string; value: string; pct: number }) {
+  return (
+    <div className="mt-1.5">
+      <div className="mb-0.5 flex justify-between">
+        <span className="text-white/45">{label}</span>
+        <span className="tabular-nums">{value}</span>
+      </div>
+      <div className="h-1 w-full overflow-hidden rounded-full bg-white/10">
+        <div
+          className="h-full rounded-full bg-[color:var(--accent)]"
+          style={{ width: `${Math.min(100, Math.max(0, pct))}%` }}
+        />
+      </div>
+    </div>
+  );
+}
+
+/** Info bubble for a reply: a "?" icon that reveals usage details on hover.
+ *  Token counts for direct-API replies; model + plan usage for claude.ai web. */
+function UsageInfo({ usage, webInfo }: { usage?: Usage; webInfo?: WebInfo }) {
+  const model = usage?.model ?? webInfo?.model ?? "";
+  const ctx = usage ? contextWindow(usage.model) : null;
+  const ctxPct = usage && ctx ? Math.min(100, Math.round((usage.inputTokens / ctx) * 100)) : null;
+  return (
+    <div className="group/info relative flex items-center">
+      <span className="flex items-center justify-center rounded-md p-1 text-white/35 transition group-hover/info:text-white/80">
+        <InfoIcon className="h-3.5 w-3.5" />
+      </span>
+      <div className="pointer-events-none absolute bottom-full left-0 z-20 mb-1 w-52 rounded-lg border border-white/10 bg-neutral-900/95 p-2.5 text-[11px] text-white/80 opacity-0 shadow-xl transition group-hover/info:opacity-100">
+        <div className="mb-1.5 truncate font-medium text-white/90">{model}</div>
+        {usage ? (
+          <>
+            <div className="flex justify-between">
+              <span className="text-white/45">Input</span>
+              <span className="tabular-nums">{fmtTokens(usage.inputTokens)} tok</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-white/45">Output</span>
+              <span className="tabular-nums">{fmtTokens(usage.outputTokens)} tok</span>
+            </div>
+            <div className="mt-0.5 flex justify-between border-t border-white/10 pt-0.5">
+              <span className="text-white/45">Total</span>
+              <span className="tabular-nums">{fmtTokens(usage.inputTokens + usage.outputTokens)} tok</span>
+            </div>
+            {ctx && ctxPct !== null ? (
+              <Meter
+                label="Context"
+                value={`${fmtTokens(usage.inputTokens)} / ${fmtTokens(ctx)} · ${ctxPct}%`}
+                pct={ctxPct}
+              />
+            ) : null}
+          </>
+        ) : null}
+        {webInfo ? (
+          <>
+            <div className="mb-0.5 text-white/45">Plan usage</div>
+            <Meter label="5-hour" value={`${Math.round(webInfo.usage5h * 100)}%`} pct={webInfo.usage5h * 100} />
+            <Meter label="7-day" value={`${Math.round(webInfo.usage7d * 100)}%`} pct={webInfo.usage7d * 100} />
+          </>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+// ChatGPT wraps the sandbox download link in bold, but often splits the closing
+// `**` into the next paragraph, leaving a stray literal `**`. Since we render a
+// real file card, strip the sandbox link (and its wrapping bold) from the text —
+// but only for files we actually reconstructed, so nothing is silently dropped.
+function cleanAssistantText(content: string, files?: FileArtifact[]): string {
+  if (!files || files.length === 0) return content;
+  let out = content;
+  for (const f of files) {
+    const esc = f.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const re = new RegExp(`\\*{0,2}\\s*\\[[^\\]]*\\]\\(sandbox:[^)]*${esc}[^)]*\\)\\*{0,2}`, "g");
+    out = out.replace(re, "");
+  }
+  return out.replace(/\n{3,}/g, "\n\n").trim();
+}
+
+/** A file claude.ai built server-side: a compact card that opens a preview
+ *  window on click, with a Download button. The code isn't shown inline. */
+function FileCard({ file }: { file: FileArtifact }) {
+  const dot = file.name.lastIndexOf(".");
+  const base = dot > 0 ? file.name.slice(0, dot) : file.name;
+  const ext = dot > 0 ? file.name.slice(dot + 1).toUpperCase() : (file.language || "FILE").toUpperCase();
+  const title = base.charAt(0).toUpperCase() + base.slice(1);
+  const isHtml = /\.html?$/i.test(file.name);
+  return (
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={() =>
+        invoke("open_file_preview", {
+          name: file.name,
+          language: file.language,
+          content: file.content,
+        }).catch(() => {})
+      }
+      className="mt-2 flex cursor-pointer items-center gap-3 rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2.5 transition hover:bg-white/[0.06]"
+    >
+      <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-white/10 bg-white/[0.04] text-white/50">
+        <FileIcon className="h-4 w-4" />
+      </span>
+      <span className="flex min-w-0 flex-1 flex-col">
+        <span className="truncate text-sm font-medium text-white/90">{title}</span>
+        <span className="text-[11px] text-white/40">{ext}</span>
+      </span>
+      {isHtml ? (
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            invoke("open_html_in_browser", { name: file.name, content: file.content }).catch(() => {});
+          }}
+          className="shrink-0 rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-[11px] font-medium text-white/80 transition hover:bg-white/10"
+        >
+          Run
+        </button>
+      ) : null}
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          invoke("save_file", { name: file.name, content: file.content }).catch(() => {});
+        }}
+        className="shrink-0 rounded-lg bg-white/10 px-3 py-1.5 text-[11px] font-medium text-white/90 transition hover:bg-white/20"
+      >
+        Download
+      </button>
+    </div>
   );
 }
 
@@ -737,23 +895,42 @@ export function Chat() {
                 <div key={m.id} className="group/msg min-w-0 max-w-full self-start px-0.5 text-sm text-white/90">
                   <div className="max-w-none overflow-hidden break-words [overflow-wrap:anywhere]">
                     {m.content ? (
-                      <MarkdownMessage content={m.content} />
-                    ) : sending ? (
+                      <MarkdownMessage content={cleanAssistantText(m.content, m.files)} />
+                    ) : sending || m.toolStatus ? (
                       <TypingDots />
                     ) : null}
                   </div>
-                  {m.content ? (
+                  {m.toolStatus ? (
+                    <div className="mt-1 flex items-center gap-1.5 text-[11px] italic text-white/40">
+                      <SpinnerIcon className="h-3 w-3 animate-spin" />
+                      {m.toolStatus}…
+                    </div>
+                  ) : null}
+                  {m.files && m.files.length > 0 ? (
+                    <div className="mt-1">
+                      {m.files.map((f) => (
+                        <FileCard key={f.name} file={f} />
+                      ))}
+                    </div>
+                  ) : null}
+                  {m.content || (m.files && m.files.length > 0) ? (
                     <div className="mt-0.5 flex items-center gap-0.5 opacity-0 transition group-hover/msg:opacity-100">
                       {m.createdAt ? (
                         <span className="mr-0.5 text-[10px] tabular-nums text-white/30">
                           {formatTime(m.createdAt)}
                         </span>
                       ) : null}
-                      <RowCopy getText={() => m.content} />
+                      {m.content ? <RowCopy getText={() => m.content} /> : null}
                       {i === messages.length - 1 && !sending ? (
                         <RowAction label="Regenerate response" onClick={() => regenerateLast()}>
                           <RegenerateIcon className="h-3.5 w-3.5" />
                         </RowAction>
+                      ) : null}
+                      {(m.usage && m.usage.inputTokens + m.usage.outputTokens > 0) || m.webInfo ? (
+                        <UsageInfo
+                          usage={m.usage && m.usage.inputTokens + m.usage.outputTokens > 0 ? m.usage : undefined}
+                          webInfo={m.webInfo}
+                        />
                       ) : null}
                     </div>
                   ) : null}

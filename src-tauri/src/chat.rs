@@ -98,6 +98,95 @@ pub async fn pick_files() -> Result<Vec<Attachment>, String> {
     .map_err(|e| format!("file picker task failed: {e}"))?
 }
 
+/// The file currently shown in the preview window.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewPayload {
+    name: String,
+    language: String,
+    content: String,
+}
+
+#[derive(Default)]
+pub struct PreviewFile(pub Mutex<Option<PreviewPayload>>);
+
+/// Opens (or reuses) a dedicated window showing a file's contents with line
+/// numbers and syntax highlighting.
+#[command]
+pub async fn open_file_preview(
+    app: tauri::AppHandle,
+    name: String,
+    language: String,
+    content: String,
+) -> Result<(), String> {
+    if let Ok(mut guard) = app.state::<PreviewFile>().0.lock() {
+        *guard = Some(PreviewPayload { name: name.clone(), language, content });
+    }
+
+    if let Some(w) = app.get_webview_window("file-preview") {
+        let _ = w.set_title(&format!("{name} — Ace"));
+        let _ = w.show();
+        let _ = w.set_focus();
+        let _ = app.emit_to("file-preview", "preview://update", ());
+        return Ok(());
+    }
+
+    WebviewWindowBuilder::new(&app, "file-preview", WebviewUrl::App("index.html".into()))
+        .title(format!("{name} — Ace"))
+        .inner_size(820.0, 620.0)
+        .min_inner_size(420.0, 320.0)
+        .resizable(true)
+        .decorations(false)
+        .build()
+        .map_err(|e| format!("failed to open preview window: {e}"))?;
+    Ok(())
+}
+
+/// Returns the file the preview window should display.
+#[command]
+pub fn get_preview_file(app: tauri::AppHandle) -> Option<PreviewPayload> {
+    app.state::<PreviewFile>().0.lock().ok().and_then(|g| g.clone())
+}
+
+/// Writes HTML to a temp file and opens it in the user's default browser so they
+/// can run/preview a generated page (e.g. a game).
+#[command]
+pub async fn open_html_in_browser(
+    app: tauri::AppHandle,
+    name: String,
+    content: String,
+) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let dir = std::env::temp_dir().join("ace_previews");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("failed to prepare preview dir: {e}"))?;
+    // Sanitise the filename to a safe basename.
+    let safe: String = basename(&name)
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    let safe = if safe.is_empty() { "preview.html".to_string() } else { safe };
+    let path = dir.join(&safe);
+    std::fs::write(&path, content).map_err(|e| format!("failed to write preview: {e}"))?;
+    app.opener()
+        .open_path(path.to_string_lossy().to_string(), None::<&str>)
+        .map_err(|e| format!("failed to open preview: {e}"))?;
+    Ok(())
+}
+
+/// Saves generated text content to a user-chosen path (for file-artifact downloads).
+#[command]
+pub async fn save_file(name: String, content: String) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let Some(path) = rfd::FileDialog::new().set_file_name(&name).save_file() else {
+            return Ok(false);
+        };
+        std::fs::write(&path, content).map_err(|e| format!("failed to save {name}: {e}"))?;
+        Ok(true)
+    })
+    .await
+    .map_err(|e| format!("save task failed: {e}"))?
+}
+
 #[command]
 pub async fn transcribe_audio(audio_base64: String, mime: String) -> Result<String, String> {
     let token = load_valid_token("openai")
@@ -227,6 +316,168 @@ struct ChatErrorEvent {
 struct WebSavedEvent {
     request_id: String,
     conversation_id: String,
+}
+
+/// Token usage reported by the inference APIs, surfaced per assistant message.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct UsageEvent {
+    request_id: String,
+    input_tokens: u64,
+    output_tokens: u64,
+    model: String,
+}
+
+/// A tool step claude.ai ran server-side (e.g. "Creating file", "Running
+/// command"), surfaced so the UI isn't silent during tool-call gaps.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct ToolEvent {
+    request_id: String,
+    label: String,
+}
+
+/// A file claude.ai created/edited server-side, reconstructed from the stream.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct FileArtifact {
+    name: String,
+    language: String,
+    content: String,
+}
+
+/// The final set of files claude.ai presented at the end of a response.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct FilesEvent {
+    request_id: String,
+    files: Vec<FileArtifact>,
+}
+
+/// Info claude.ai's web stream exposes instead of token usage: the model, and
+/// the account's plan-usage windows (fraction 0..1 of the 5h / 7d limits).
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct WebInfoEvent {
+    request_id: String,
+    model: String,
+    usage5h: f64,
+    usage7d: f64,
+}
+
+/// Best-effort syntax-highlight language from a filename.
+fn language_for(name: &str) -> String {
+    let lower = name.to_lowercase();
+    if lower == "makefile" || lower.ends_with(".mk") {
+        return "makefile".into();
+    }
+    let ext = lower.rsplit('.').next().unwrap_or("");
+    match ext {
+        "c" | "h" => "c",
+        "hpp" | "hh" | "hxx" | "cpp" | "cc" | "cxx" | "c++" => "cpp",
+        "rs" => "rust",
+        "py" => "python",
+        "js" | "mjs" | "cjs" => "javascript",
+        "ts" => "typescript",
+        "tsx" => "tsx",
+        "jsx" => "jsx",
+        "go" => "go",
+        "java" => "java",
+        "rb" => "ruby",
+        "php" => "php",
+        "sh" | "bash" => "bash",
+        "json" => "json",
+        "toml" => "toml",
+        "yaml" | "yml" => "yaml",
+        "md" | "markdown" => "markdown",
+        "html" | "htm" => "html",
+        "css" => "css",
+        "sql" => "sql",
+        _ => "",
+    }
+    .to_string()
+}
+
+fn basename(path: &str) -> String {
+    path.rsplit(['/', '\\']).next().unwrap_or(path).to_string()
+}
+
+/// Extracts triple-quoted (`'''` / `"""`) string literals from python source.
+fn triple_quoted_strings(code: &str) -> Vec<String> {
+    let b = code.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i + 3 <= b.len() {
+        let is_sq = &b[i..i + 3] == b"'''";
+        let is_dq = &b[i..i + 3] == b"\"\"\"";
+        if is_sq || is_dq {
+            let delim: &[u8] = if is_sq { b"'''" } else { b"\"\"\"" };
+            let start = i + 3;
+            let mut j = start;
+            let mut found = None;
+            while j + 3 <= b.len() {
+                if &b[j..j + 3] == delim {
+                    found = Some(j);
+                    break;
+                }
+                j += 1;
+            }
+            match found {
+                Some(end) => {
+                    if let Ok(s) = std::str::from_utf8(&b[start..end]) {
+                        out.push(s.to_string());
+                    }
+                    i = end + 3;
+                }
+                None => break,
+            }
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Removes common leading whitespace (mimics python's textwrap.dedent) and a
+/// single leading newline, so `dedent('''\n<html>...''')` comes out clean.
+fn dedent_str(s: &str) -> String {
+    let s = s.strip_prefix('\n').unwrap_or(s);
+    let indent = s
+        .split('\n')
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.len() - l.trim_start().len())
+        .min()
+        .unwrap_or(0);
+    s.split('\n')
+        .map(|l| if l.len() >= indent { &l[indent..] } else { l })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Best-effort reconstruction of the files ChatGPT's code-interpreter wrote to
+/// the sandbox: the file contents live as triple-quoted string literals in the
+/// python code. Pairs them with the presented filenames.
+fn reconstruct_python_files(code: &str, names: &[String]) -> Vec<FileArtifact> {
+    let strings = triple_quoted_strings(code);
+    if strings.is_empty() || names.is_empty() {
+        return Vec::new();
+    }
+
+    let mut out = Vec::new();
+    if names.len() == 1 {
+        // Single file → the largest literal is its content.
+        if let Some(content) = strings.iter().max_by_key(|s| s.len()) {
+            let name = basename(&names[0]);
+            out.push(FileArtifact { language: language_for(&name), name, content: dedent_str(content) });
+        }
+    } else {
+        // Multiple files → pair with literals in appearance order (best effort).
+        for (name, content) in names.iter().zip(strings.iter()) {
+            let name = basename(name);
+            out.push(FileArtifact { language: language_for(&name), name, content: dedent_str(content) });
+        }
+    }
+    out.into_iter().filter(|f| !f.content.trim().is_empty()).collect()
 }
 
 #[derive(Serialize, Clone)]
@@ -866,6 +1117,16 @@ async fn get_anthropic_conversation(
 /// Sentinel parent used by claude.ai for the first message in a conversation.
 const CLAUDE_ROOT_PARENT: &str = "00000000-0000-4000-8000-000000000000";
 
+/// Appends a raw SSE frame to a debug log (temp dir) when ACE_DEBUG_STREAM is set.
+/// Used to capture claude.ai's undocumented tool/artifact event format.
+fn debug_stream_append(line: &str) {
+    let path = std::env::temp_dir().join("ace_claude_stream.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        use std::io::Write;
+        let _ = writeln!(f, "{line}");
+    }
+}
+
 fn new_uuid_v4() -> String {
     use rand::RngCore;
     let mut b = [0u8; 16];
@@ -1022,6 +1283,25 @@ async fn stream_claude_web(
     let mut stream = response.bytes_stream();
     let mut buffer = String::new();
 
+    // Opt-in raw-stream capture (set ACE_DEBUG_STREAM=1) so we can inspect
+    // claude.ai's tool_use / artifact event shapes.
+    let debug_log = std::env::var("ACE_DEBUG_STREAM").is_ok();
+    if debug_log {
+        debug_stream_append("===== new claude.ai response =====");
+    }
+
+    // claude.ai runs server-side tools (create_file / str_replace / bash_tool /
+    // present_files). We reconstruct the files it builds from the tool inputs so
+    // Ace can render them, and surface each tool step so gaps aren't silent.
+    // index -> (tool name, accumulated input JSON)
+    let mut tool_blocks: HashMap<u64, (String, String)> = HashMap::new();
+    // basename -> file content (the reconstructed virtual filesystem)
+    let mut files: HashMap<String, String> = HashMap::new();
+    // claude.ai reports model + plan-usage windows instead of token counts.
+    let mut web_model = String::new();
+    let mut usage_5h = 0f64;
+    let mut usage_7d = 0f64;
+
     loop {
         let chunk = tokio::select! {
             _ = cancel.cancelled() => break,
@@ -1042,26 +1322,183 @@ async fn stream_claude_web(
             if data.is_empty() || data == "[DONE]" {
                 continue;
             }
+            if debug_log {
+                debug_stream_append(data);
+            }
             let Ok(parsed) = serde_json::from_str::<serde_json::Value>(data) else { continue };
 
-            // Text arrives either as a top-level `completion` string (classic
-            // claude.ai SSE) or as a content_block_delta `/delta/text`.
-            let delta = parsed
-                .get("completion")
-                .and_then(|v| v.as_str())
-                .or_else(|| parsed.pointer("/delta/text").and_then(|v| v.as_str()));
-            if let Some(d) = delta {
-                if !d.is_empty() {
-                    let _ = app.emit(
-                        "chat://chunk",
-                        ChunkEvent { request_id: request_id.to_string(), delta: d.to_string() },
-                    );
+            match parsed.get("type").and_then(|v| v.as_str()) {
+                Some("content_block_start") => {
+                    let index = parsed.get("index").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let block = parsed.get("content_block");
+                    match block.and_then(|b| b.get("type")).and_then(|v| v.as_str()) {
+                        Some("tool_use") => {
+                            let name = block
+                                .and_then(|b| b.get("name"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            tool_blocks.insert(index, (name.clone(), String::new()));
+                            // Surface the step label ("Creating file", "Running command"…).
+                            if let Some(label) =
+                                block.and_then(|b| b.get("message")).and_then(|v| v.as_str())
+                            {
+                                if !label.is_empty() {
+                                    let _ = app.emit(
+                                        "chat://tool",
+                                        ToolEvent {
+                                            request_id: request_id.to_string(),
+                                            label: label.to_string(),
+                                        },
+                                    );
+                                }
+                            }
+                        }
+                        Some("tool_result") => {
+                            let name =
+                                block.and_then(|b| b.get("name")).and_then(|v| v.as_str()).unwrap_or("");
+                            if name == "present_files" {
+                                emit_presented_files(app, request_id, block, &files);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                Some("content_block_delta") => {
+                    let delta = parsed.get("delta");
+                    match delta.and_then(|d| d.get("type")).and_then(|v| v.as_str()) {
+                        Some("text_delta") => {
+                            if let Some(d) = delta.and_then(|d| d.get("text")).and_then(|v| v.as_str()) {
+                                if !d.is_empty() {
+                                    let _ = app.emit(
+                                        "chat://chunk",
+                                        ChunkEvent { request_id: request_id.to_string(), delta: d.to_string() },
+                                    );
+                                }
+                            }
+                        }
+                        Some("input_json_delta") => {
+                            let index = parsed.get("index").and_then(|v| v.as_u64()).unwrap_or(0);
+                            if let Some((_, buf)) = tool_blocks.get_mut(&index) {
+                                if let Some(frag) =
+                                    delta.and_then(|d| d.get("partial_json")).and_then(|v| v.as_str())
+                                {
+                                    buf.push_str(frag);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                Some("content_block_stop") => {
+                    let index = parsed.get("index").and_then(|v| v.as_u64()).unwrap_or(0);
+                    if let Some((name, input)) = tool_blocks.remove(&index) {
+                        apply_file_tool(&name, &input, &mut files);
+                    }
+                }
+                Some("message_start") => {
+                    if let Some(m) = parsed.pointer("/message/model").and_then(|v| v.as_str()) {
+                        web_model = m.to_string();
+                    }
+                }
+                Some("message_limit") => {
+                    if let Some(u) =
+                        parsed.pointer("/message_limit/windows/5h/utilization").and_then(|v| v.as_f64())
+                    {
+                        usage_5h = u;
+                    }
+                    if let Some(u) =
+                        parsed.pointer("/message_limit/windows/7d/utilization").and_then(|v| v.as_f64())
+                    {
+                        usage_7d = u;
+                    }
+                }
+                // Classic claude.ai SSE also delivers plain text under `completion`.
+                _ => {
+                    if let Some(d) = parsed.get("completion").and_then(|v| v.as_str()) {
+                        if !d.is_empty() {
+                            let _ = app.emit(
+                                "chat://chunk",
+                                ChunkEvent { request_id: request_id.to_string(), delta: d.to_string() },
+                            );
+                        }
+                    }
                 }
             }
         }
     }
 
+    if !web_model.is_empty() {
+        let _ = app.emit(
+            "chat://webinfo",
+            WebInfoEvent {
+                request_id: request_id.to_string(),
+                model: web_model,
+                usage5h: usage_5h,
+                usage7d: usage_7d,
+            },
+        );
+    }
+
     Ok(())
+}
+
+/// Applies a completed file tool's input to the reconstructed filesystem.
+fn apply_file_tool(name: &str, input: &str, files: &mut HashMap<String, String>) {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(input) else { return };
+    match name {
+        "create_file" => {
+            if let (Some(path), Some(text)) = (
+                v.get("path").and_then(|p| p.as_str()),
+                v.get("file_text").and_then(|t| t.as_str()),
+            ) {
+                files.insert(basename(path), text.to_string());
+            }
+        }
+        "str_replace" => {
+            if let (Some(path), Some(old), Some(new)) = (
+                v.get("path").and_then(|p| p.as_str()),
+                v.get("old_str").and_then(|t| t.as_str()),
+                v.get("new_str").and_then(|t| t.as_str()),
+            ) {
+                let key = basename(path);
+                if let Some(content) = files.get_mut(&key) {
+                    if let Some(pos) = content.find(old) {
+                        content.replace_range(pos..pos + old.len(), new);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Emits the final presented file set, pulling reconstructed content by basename.
+fn emit_presented_files(
+    app: &tauri::AppHandle,
+    request_id: &str,
+    block: Option<&serde_json::Value>,
+    files: &HashMap<String, String>,
+) {
+    let Some(content) = block.and_then(|b| b.get("content")).and_then(|v| v.as_array()) else {
+        return;
+    };
+    let mut out = Vec::new();
+    for item in content {
+        let Some(path) = item.get("file_path").and_then(|v| v.as_str()) else { continue };
+        let name = basename(path);
+        let body = files.get(&name).cloned().unwrap_or_default();
+        if body.is_empty() {
+            continue; // no reconstructed content (e.g. a binary) — skip
+        }
+        out.push(FileArtifact { language: language_for(&name), name, content: body });
+    }
+    if !out.is_empty() {
+        let _ = app.emit(
+            "chat://files",
+            FilesEvent { request_id: request_id.to_string(), files: out },
+        );
+    }
 }
 
 /// EXPERIMENTAL: send a turn into the user's real claude.ai account conversation.
@@ -1251,12 +1688,19 @@ pub async fn open_chatgpt_login(app: tauri::AppHandle) -> Result<(), String> {
     let url = WebviewUrl::External(
         "https://chatgpt.com/".parse().map_err(|_| "invalid chatgpt.com url".to_string())?,
     );
+    // Opt-in raw-stream capture for studying ChatGPT's canvas/file events.
+    let script = if std::env::var("ACE_DEBUG_STREAM").is_ok() {
+        format!("{ACE_CHATGPT_SCRIPT}\nwindow.__aceDebug=true;")
+    } else {
+        ACE_CHATGPT_SCRIPT.to_string()
+    };
+
     let app_nav = app.clone();
     WebviewWindowBuilder::new(&app, "chatgpt-login", url)
         .title("Verify ChatGPT — Ace")
         .inner_size(480.0, 720.0)
         .user_agent(OPENAI_WEB_UA)
-        .initialization_script(ACE_CHATGPT_SCRIPT)
+        .initialization_script(&script)
         // The injected script signals Ace by navigating to https://ace.relay/… —
         // intercept those, act on them, and cancel (false) so the page stays put.
         // Everything else navigates normally (true).
@@ -1312,19 +1756,50 @@ const ACE_CHATGPT_SCRIPT: &str = r#"
   }
   function stopFlush() { if (flushTimer) { clearInterval(flushTimer); flushTimer = null; } }
 
+  // ChatGPT's v1 delta protocol streams several message nodes (system, the
+  // python code-interpreter tool, execution output, then the visible answer).
+  // Only the assistant message with recipient "all" + content_type "text" is the
+  // user-facing reply — everything else (code etc.) must NOT be shown as text.
+  function isVisibleMsg(m) {
+    return !!(m && m.author && m.author.role === 'assistant'
+      && m.recipient === 'all'
+      && m.content && m.content.content_type === 'text');
+  }
+  function isCodeMsg(m) {
+    return !!(m && m.author && m.author.role === 'assistant'
+      && m.content && m.content.content_type === 'code');
+  }
+  function applyNode(m, convId) {
+    if (convId && !cur.conv) cur.conv = convId;
+    // Track which stream the current message writes into.
+    cur.mode = isVisibleMsg(m) ? 'text' : (isCodeMsg(m) ? 'code' : 'other');
+    if (cur.mode === 'text') {
+      var parts = (m.content && m.content.parts) || [];
+      var t = parts.join('');
+      if (t) cur.text += t; // initial content (usually empty)
+    }
+  }
+  function feedStr(s, path) {
+    if (cur.mode === 'text' && (!path || path.indexOf('/parts/') !== -1)) cur.text += s;
+    // Code-interpreter code streams into /content/text — capture it so we can
+    // reconstruct any file it writes to the sandbox.
+    else if (cur.mode === 'code' && (!path || path.indexOf('/text') !== -1)) cur.code += s;
+  }
   function feed(d) {
     if (!cur) return;
     var o; try { o = JSON.parse(d); } catch (e) { return; }
-    if (o.conversation_id && !cur.conv) cur.conv = o.conversation_id;
-    if (o.message && o.message.author && o.message.author.role === 'assistant') {
-      var parts = (o.message.content && o.message.content.parts) || [];
-      var t = parts.join(''); if (t) cur.text = t;
-    } else if (typeof o.v === 'string') {
-      cur.text += o.v;
-    } else if (o.v && typeof o.v === 'object') {
-      if (o.v.conversation_id && !cur.conv) cur.conv = o.v.conversation_id;
-      if (o.v.message) { var p2 = (o.v.message.content && o.v.message.content.parts) || []; if (p2.join('')) cur.text = p2.join(''); }
+    var val = o.v, path = o.p;
+    if (val && typeof val === 'object' && val.message) { applyNode(val.message, val.conversation_id); return; }
+    if (typeof val === 'string') { feedStr(val, path); return; }
+    if (Array.isArray(val)) {
+      for (var i = 0; i < val.length; i++) {
+        var sub = val[i];
+        if (sub && sub.v && typeof sub.v === 'object' && sub.v.message) { applyNode(sub.v.message, sub.v.conversation_id); }
+        else if (sub && typeof sub.v === 'string') { feedStr(sub.v, sub.p); }
+      }
+      return;
     }
+    if (o.conversation_id && !cur.conv) cur.conv = o.conversation_id;
   }
 
   var origFetch = window.fetch;
@@ -1337,7 +1812,7 @@ const ACE_CHATGPT_SCRIPT: &str = r#"
         try {
           var ct = (res.headers.get('content-type') || '');
           if (ct.indexOf('event-stream') === -1 || !window.__aceReq) return;
-          cur = { id: window.__aceReq, text: '', conv: null, sent: '' };
+          cur = { id: window.__aceReq, text: '', code: '', conv: null, sent: '', raw: '', mode: 'other' };
           window.__aceReq = null;
           startFlush();
           var reader = res.clone().body.getReader();
@@ -1353,13 +1828,22 @@ const ACE_CHATGPT_SCRIPT: &str = r#"
                 buf.split('\n').forEach(function (line) {
                   if (line.indexOf('data:') === 0) { var d = line.slice(5).trim(); if (d && d !== '[DONE]') feed(d); }
                 });
+                // Opt-in: ship the whole raw SSE so we can study canvas/file events.
+                if (window.__aceDebug && cur.raw) { sig('debug', cur.id, { raw: cur.raw }); }
+                // Reconstruct sandbox files ChatGPT wrote from the code, if any.
+                var names = [];
+                var re = /sandbox:\/mnt\/data\/([^)\s"'<>]+)/g, mt;
+                while ((mt = re.exec(cur.text)) !== null) { if (names.indexOf(mt[1]) === -1) names.push(mt[1]); }
+                if (names.length && cur.code) { sig('files', cur.id, { code: cur.code, names: names }); }
                 var payload = { text: cur.text, conv: cur.conv };
                 sig('done', cur.id, payload);
                 // Re-assert once in case the done navigation raced the last chunk.
                 setTimeout(function () { sig('done', cur.id, payload); }, 200);
                 return;
               }
-              buf += dec.decode(r.value, { stream: true });
+              var textChunk = dec.decode(r.value, { stream: true });
+              if (window.__aceDebug) { cur.raw += textChunk; }
+              buf += textChunk;
               var i;
               while ((i = buf.indexOf('\n')) !== -1) {
                 var line = buf.slice(0, i); buf = buf.slice(i + 1);
@@ -1457,6 +1941,18 @@ fn handle_ace_relay(app: &tauri::AppHandle, rest: &str) {
         .and_then(|b| String::from_utf8(b).ok())
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
         .unwrap_or_else(|| serde_json::json!({}));
+
+    if kind == "debug" {
+        // Opt-in raw ChatGPT SSE capture, to study canvas/file event shapes.
+        let raw = json.get("raw").and_then(|v| v.as_str()).unwrap_or("");
+        let path = std::env::temp_dir().join("ace_openai_stream.log");
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            use std::io::Write;
+            let _ = writeln!(f, "===== new ChatGPT response =====\n{raw}");
+        }
+        return;
+    }
+
     let text = json.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let conv = json.get("conv").and_then(|v| v.as_str()).map(String::from);
 
@@ -1499,6 +1995,19 @@ fn handle_ace_relay(app: &tauri::AppHandle, rest: &str) {
                     );
                 }
                 let _ = app.emit("chat://done", DoneEvent { request_id: id });
+            }
+        }
+        "files" => {
+            // Reconstruct sandbox files from the code-interpreter code.
+            let code = json.get("code").and_then(|v| v.as_str()).unwrap_or("");
+            let names: Vec<String> = json
+                .get("names")
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            let files = reconstruct_python_files(code, &names);
+            if !files.is_empty() {
+                let _ = app.emit("chat://files", FilesEvent { request_id: id, files });
             }
         }
         _ => {
@@ -2069,7 +2578,32 @@ async fn stream_openai(
                             );
                         }
                     }
-                    Some("response.completed") | Some("response.done") => return Ok(()),
+                    Some("response.completed") | Some("response.done") => {
+                        let usage = parsed.pointer("/response/usage");
+                        let input_tokens = usage
+                            .and_then(|u| u.get("input_tokens"))
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        let output_tokens = usage
+                            .and_then(|u| u.get("output_tokens"))
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        let used_model = parsed
+                            .pointer("/response/model")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or(model.unwrap_or("gpt-5.5"))
+                            .to_string();
+                        let _ = app.emit(
+                            "chat://usage",
+                            UsageEvent {
+                                request_id: request_id.to_string(),
+                                input_tokens,
+                                output_tokens,
+                                model: used_model,
+                            },
+                        );
+                        return Ok(());
+                    }
                     _ => {}
                 }
             }
@@ -2161,6 +2695,9 @@ async fn stream_anthropic(
 
     let mut stream = response.bytes_stream();
     let mut buffer = String::new();
+    let mut input_tokens = 0u64;
+    let mut output_tokens = 0u64;
+    let mut used_model = model.unwrap_or("claude-sonnet-4-5").to_string();
 
     loop {
         let chunk = tokio::select! {
@@ -2180,6 +2717,20 @@ async fn stream_anthropic(
                 let Some(data) = line.strip_prefix("data: ") else { continue };
                 let Ok(parsed) = serde_json::from_str::<serde_json::Value>(data) else { continue };
                 match parsed.get("type").and_then(|v| v.as_str()) {
+                    Some("message_start") => {
+                        if let Some(n) = parsed.pointer("/message/usage/input_tokens").and_then(|v| v.as_u64()) {
+                            input_tokens = n;
+                        }
+                        if let Some(m) = parsed.pointer("/message/model").and_then(|v| v.as_str()) {
+                            used_model = m.to_string();
+                        }
+                    }
+                    Some("message_delta") => {
+                        // Cumulative output token count.
+                        if let Some(n) = parsed.pointer("/usage/output_tokens").and_then(|v| v.as_u64()) {
+                            output_tokens = n;
+                        }
+                    }
                     Some("content_block_delta") => {
                         if let Some(delta) = parsed.pointer("/delta/text").and_then(|v| v.as_str()) {
                             let _ = app.emit(
@@ -2188,7 +2739,18 @@ async fn stream_anthropic(
                             );
                         }
                     }
-                    Some("message_stop") => return Ok(()),
+                    Some("message_stop") => {
+                        let _ = app.emit(
+                            "chat://usage",
+                            UsageEvent {
+                                request_id: request_id.to_string(),
+                                input_tokens,
+                                output_tokens,
+                                model: used_model.clone(),
+                            },
+                        );
+                        return Ok(());
+                    }
                     _ => {}
                 }
             }

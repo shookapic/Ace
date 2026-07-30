@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { CloseIcon } from "../ui/Icons";
 import { useAuthStore, type ProviderId } from "../../state/authStore";
@@ -14,7 +14,7 @@ import {
 } from "../../state/windowStore";
 
 const PROVIDER_LABEL: Record<ProviderId, string> = {
-  anthropic: "Claude",
+  anthropic: "Anthropic",
   openai: "OpenAI",
 };
 
@@ -191,7 +191,7 @@ function LocalChatsManager() {
                   className="h-3.5 w-3.5 shrink-0 accent-[color:var(--accent)]"
                 />
                 <span className="w-8 shrink-0 text-[9px] uppercase tracking-wide text-white/30">
-                  {c.provider === "anthropic" ? "Claude" : "GPT"}
+                  {c.provider === "anthropic" ? "ANTH" : "GPT"}
                 </span>
                 <span className="min-w-0 flex-1 truncate" title={c.title}>
                   {c.title}
@@ -254,6 +254,19 @@ export function SettingsPanel() {
     (id) => providers[id].available
   );
 
+  // Esc closes the panel from anywhere — no need to scroll up to the X.
+  useEffect(() => {
+    if (!settingsOpen) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        closeSettings();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [settingsOpen, closeSettings]);
+
   return (
     <AnimatePresence>
       {settingsOpen ? (
@@ -274,14 +287,19 @@ export function SettingsPanel() {
           >
             <div className="mb-3 flex items-center justify-between">
               <h2 className="text-sm font-semibold text-white">Settings</h2>
-              <button
-                type="button"
-                onClick={closeSettings}
-                aria-label="Close settings"
-                className="flex h-6 w-6 items-center justify-center rounded-md text-white/40 transition hover:bg-white/10 hover:text-white"
-              >
-                <CloseIcon className="h-4 w-4" />
-              </button>
+              <div className="flex items-center gap-1.5">
+                <kbd className="rounded border border-white/15 px-1.5 py-0.5 text-[9px] font-medium text-white/40">
+                  Esc
+                </kbd>
+                <button
+                  type="button"
+                  onClick={closeSettings}
+                  aria-label="Close settings"
+                  className="flex h-6 w-6 items-center justify-center rounded-md text-white/40 transition hover:bg-white/10 hover:text-white"
+                >
+                  <CloseIcon className="h-4 w-4" />
+                </button>
+              </div>
             </div>
 
             <div className="flex flex-col gap-4">
@@ -367,14 +385,31 @@ export function SettingsPanel() {
                       key={id}
                       type="button"
                       onClick={() => signOut(id)}
-                      className="flex items-center justify-between rounded-lg px-2 py-1.5 text-left text-xs text-white/70 transition hover:bg-white/[0.06] hover:text-white"
+                      className="group flex items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-left transition hover:bg-white/[0.06]"
                     >
-                      <span>Sign out of {PROVIDER_LABEL[id]}</span>
-                      <span className="text-white/25">→</span>
+                      <span className="flex min-w-0 flex-col">
+                        <span className="text-[10px] font-medium uppercase tracking-wide text-white/45">
+                          {PROVIDER_LABEL[id]}
+                        </span>
+                        <span className="truncate text-xs text-white/80" title={providers[id].detail}>
+                          {providers[id].detail ?? "Connected"}
+                        </span>
+                      </span>
+                      <span className="shrink-0 text-[11px] text-white/40 transition group-hover:text-white/70">
+                        Sign out →
+                      </span>
                     </button>
                   ))}
                 </div>
               ) : null}
+
+              <button
+                type="button"
+                onClick={closeSettings}
+                className="mt-1 w-full rounded-lg border border-white/12 py-2 text-xs font-medium text-white/75 transition hover:border-white/25 hover:text-white"
+              >
+                Done
+              </button>
             </div>
           </motion.div>
         </>

@@ -882,7 +882,21 @@ async fn find_claude_session(app: &tauri::AppHandle) -> Result<ClaudeSession, St
             return Ok(session);
         }
     }
-    firefox_claude_session()
+    // Silent fast-path: read the user's own logged-in session out of whichever
+    // browser has one. Firefox is cheapest (plaintext); Chrome/Edge/Brave and
+    // Safari need decryption, so try them only if Firefox has nothing.
+    firefox_claude_session().or_else(|_| other_browser_claude_session())
+}
+
+/// Silent claude.ai session from a non-Firefox browser (Chromium family or
+/// Safari). See [`crate::browser_cookies`] for the per-browser decryption.
+fn other_browser_claude_session() -> Result<ClaudeSession, String> {
+    let jar = crate::browser_cookies::find_claude_jar()
+        .ok_or_else(|| ANTHROPIC_NO_SESSION.to_string())?;
+    let mut session =
+        session_from_cookies(&jar.cookies).ok_or_else(|| ANTHROPIC_NO_SESSION.to_string())?;
+    session.user_agent = jar.user_agent;
+    Ok(session)
 }
 
 /// Reads the user's own logged-in claude.ai session out of their Firefox cookie

@@ -3881,6 +3881,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "35fb2e5f958ec131621fdd531e9fc186ed768cbe395337403ae56c17a74c68ec"
 
 [[package]]
+name = "pbkdf2"
+version = "0.12.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f8ed6a7761f76e3b9f92dfb0a60a6a6477c61024b775147ff0973a02653abaf2"
+dependencies = [
+ "digest",
+ "hmac",
+]
+
+[[package]]
 name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5546,21 +5556,26 @@ dependencies = [
 
 [[package]]
 name = "tauri-app"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
+ "aes",
  "aes-gcm",
  "base64 0.22.1",
+ "cbc",
  "dirs 5.0.1",
  "futures-util",
+ "hmac",
  "image",
  "keyring",
  "objc",
+ "pbkdf2",
  "rand 0.8.7",
  "reqwest 0.12.28",
  "rfd",
  "rusqlite",
  "serde",
  "serde_json",
+ "sha1",
  "sha2",
  "sha3",
  "tauri",

@@ -1,4 +1,5 @@
 mod auth;
+mod browser_cookies;
 mod chat;
 mod history;
 mod screenshot;

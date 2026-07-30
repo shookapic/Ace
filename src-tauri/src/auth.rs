@@ -75,6 +75,11 @@ pub(crate) struct StoredToken {
     refresh_token: Option<String>,
     expires_at: Option<u64>,
     pub(crate) id_token: Option<String>,
+    /// The connected account's email / username, captured at login so the UI can
+    /// show who you're signed in as. `#[serde(default)]` keeps tokens stored
+    /// before this field was added deserialising to `None`.
+    #[serde(default)]
+    account_label: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -83,6 +88,38 @@ struct TokenResponse {
     refresh_token: Option<String>,
     expires_in: Option<u64>,
     id_token: Option<String>,
+    /// Anthropic returns the signed-in account here; OpenAI carries email in the
+    /// id_token instead.
+    account: Option<AccountInfo>,
+}
+
+#[derive(Deserialize)]
+struct AccountInfo {
+    #[serde(alias = "email_address")]
+    email: Option<String>,
+}
+
+/// The account's display identity from a token response: Anthropic's `account`
+/// object, else the `email`/`name` claim inside an OIDC id_token (OpenAI).
+fn derive_account_label(parsed: &TokenResponse) -> Option<String> {
+    if let Some(email) = parsed.account.as_ref().and_then(|a| a.email.as_deref()) {
+        if !email.is_empty() {
+            return Some(email.to_string());
+        }
+    }
+    parsed.id_token.as_deref().and_then(jwt_email)
+}
+
+/// Pulls a human label (email, else username/name) out of a JWT's claims.
+fn jwt_email(jwt: &str) -> Option<String> {
+    let payload_b64 = jwt.split('.').nth(1)?;
+    let bytes = URL_SAFE_NO_PAD.decode(payload_b64).ok()?;
+    let claims: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    ["email", "preferred_username", "name"]
+        .iter()
+        .find_map(|k| claims.get(k).and_then(|v| v.as_str()))
+        .filter(|s| !s.is_empty())
+        .map(String::from)
 }
 
 fn generate_pkce() -> (String, String) {
@@ -243,11 +280,13 @@ async fn exchange_code(
     let parsed: TokenResponse = serde_json::from_str(&text)
         .map_err(|e| format!("failed to parse token response: {e}"))?;
 
+    let account_label = derive_account_label(&parsed);
     Ok(StoredToken {
         access_token: parsed.access_token,
         refresh_token: parsed.refresh_token,
         expires_at: parsed.expires_in.map(|s| now_secs() + s),
         id_token: parsed.id_token,
+        account_label,
     })
 }
 
@@ -298,12 +337,14 @@ async fn refresh_access_token(
     let parsed: TokenResponse = serde_json::from_str(&text)
         .map_err(|e| format!("failed to parse token response: {e}"))?;
 
+    let account_label = derive_account_label(&parsed);
     Ok(StoredToken {
         access_token: parsed.access_token,
         // Providers may omit a rotated refresh token; keep the existing one then.
         refresh_token: parsed.refresh_token.or_else(|| Some(refresh_token.to_string())),
         expires_at: parsed.expires_in.map(|s| now_secs() + s),
         id_token: parsed.id_token,
+        account_label,
     })
 }
 
@@ -324,7 +365,12 @@ pub(crate) async fn load_valid_token(provider: &str) -> Option<StoredToken> {
     let refresh = token.refresh_token.clone()?;
     let cfg = provider_config(provider).ok()?;
     match refresh_access_token(cfg, &refresh).await {
-        Ok(new_token) => {
+        Ok(mut new_token) => {
+            // A refresh response often omits the account/id_token, so carry the
+            // identity captured at the original login forward.
+            if new_token.account_label.is_none() {
+                new_token.account_label = token.account_label.clone();
+            }
             let _ = store_token(provider, &new_token);
             Some(new_token)
         }
@@ -383,7 +429,7 @@ fn run_loopback_listener(port: u16, expected_state: String) -> Result<(String, S
                     .with_status_code(400)
                     .with_header(tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/html"[..]).unwrap());
                 let _ = request.respond(response);
-                return Err("OAuth state mismatch".into());
+                return Err("OAuth state mismatch. Please try again.".into());
             }
             _ => {
                 let response = tiny_http::Response::from_string("Missing code or state parameters")
@@ -491,10 +537,22 @@ pub fn get_auth_status(provider: String) -> Result<AuthStatus, String> {
         None => false,
     };
 
+    // Who you're signed in as: the label captured at login, or (for tokens
+    // stored before that field existed) recovered from the id_token.
+    let detail = if available {
+        stored.as_ref().and_then(|t| {
+            t.account_label
+                .clone()
+                .or_else(|| t.id_token.as_deref().and_then(jwt_email))
+        })
+    } else {
+        None
+    };
+
     Ok(AuthStatus {
         provider: cfg.id.to_string(),
         available,
-        detail: None,
+        detail,
     })
 }
 
